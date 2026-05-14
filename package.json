@@ -1,0 +1,63 @@
+{
+  "name": "ipingyou",
+  "version": "1.0.0",
+  "description": "SecureLink-CLI — Secure peer-to-peer remote access via SSH & Cloudflare Tunnels",
+  "main": "src/cli.js",
+  "bin": {
+    "ipingyou": "./src/cli.js",
+    "securelink": "./src/cli.js"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE",
+    "render.yaml"
+  ],
+  "scripts": {
+    "start": "node src/cli.js",
+    "broker": "node src/server.js",
+    "dev:broker": "nodemon src/server.js",
+    "dev:cli": "node src/cli.js",
+    "prepublishOnly": "node -e \"require('fs').accessSync('LICENSE')\" && node src/cli.js --help"
+  },
+  "keywords": [
+    "ssh",
+    "remote-access",
+    "cloudflare-tunnel",
+    "cloudflared",
+    "cli",
+    "peer-to-peer",
+    "securelink",
+    "tunnel",
+    "remote-desktop",
+    "p2p"
+  ],
+  "author": "skmirajulislam",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skmirajulislam/ipingyou.git"
+  },
+  "homepage": "https://github.com/skmirajulislam/ipingyou#readme",
+  "bugs": {
+    "url": "https://github.com/skmirajulislam/ipingyou/issues"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "execa": "^9.5.2",
+    "express": "^4.21.0",
+    "inquirer": "^12.3.2",
+    "nanoid": "^5.0.9",
+    "ora": "^8.1.1",
+    "tree-kill": "^1.2.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "type": "module"
+}

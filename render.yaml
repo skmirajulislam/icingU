@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ipingyou-broker
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node src/server.js
+    envVars:
+      - key: SECRET_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
