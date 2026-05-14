@@ -22,7 +22,7 @@ import { trackPID, untrackPID, setRevokeOnExit } from '../lib/cleanup.js';
 import { detectOS } from '../lib/platform.js';
 import { createSpinner, cryptoSpinner, tunnelSpinner, networkSpinner, typeText } from '../lib/animations.js';
 
-const BROKER_URL = process.env.BROKER_URL || 'http://localhost:4000';
+const BROKER_URL = process.env.BROKER_URL || 'https://ipingyou.onrender.com';
 
 /**
  * Ensure the local SSH server is running.
@@ -307,7 +307,6 @@ export async function startHostMode() {
   const registered = await registerWithBroker(uid, tunnel.url);
   if (!registered) {
     console.error(chalk.red(`\n  ❌ FATAL: Could not register with broker at ${BROKER_URL}`));
-    console.log(chalk.dim('     Is the broker running? Try: npx ipingyou broker'));
     process.exit(1);
   }
 

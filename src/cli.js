@@ -11,7 +11,6 @@
  *    npx ipingyou              — Interactive mode
  *    npx ipingyou host         — Start as host directly
  *    npx ipingyou connect      — Start as client directly
- *    npx ipingyou broker       — Start the central broker
  *
  *  Security:
  *    All tunnel URLs are AES-256-CBC encrypted on the CLI side.
@@ -19,7 +18,6 @@
  * ============================================================
  */
 
-import 'dotenv/config';
 import { Command } from 'commander';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
@@ -61,7 +59,6 @@ function showRichHelp() {
   console.log(`    ${chalk.green('host')}    : Generates a secure session UID and exposes your local machine.`);
   console.log(`    ${chalk.blue('connect')} : Prompts for a UID to connect to a remote host.`);
   console.log(`              ${chalk.dim('Supports Interactive SSH Shell & SCP File Transfers')}`);
-  console.log(`    ${chalk.yellow('broker')}  : Start your own relay server (for self-hosting).`);
   console.log('');
   
   console.log(chalk.bold.white('  🔒 Security Architecture:'));
@@ -74,7 +71,6 @@ function showRichHelp() {
   console.log(`    $ npx ipingyou          ${chalk.dim('# Interactive wizard (Recommended)')}`);
   console.log(`    $ npx ipingyou host     ${chalk.dim('# Quick start as Host')}`);
   console.log(`    $ npx ipingyou connect  ${chalk.dim('# Quick start as Client')}`);
-  console.log(`    $ npx ipingyou broker   ${chalk.dim('# Start Relay')}`);
   console.log('');
 }
 
@@ -135,10 +131,6 @@ async function interactiveMode() {
         },
         new inquirer.Separator(),
         {
-          name: `${chalk.yellow('📡 Start Broker Server')}  ${chalk.dim('— Run the central relay (for self-hosting)')}`,
-          value: 'broker',
-        },
-        {
           name: `${chalk.magenta('📖 Help / Information')}   ${chalk.dim('— Learn how iPingYou works')}`,
           value: 'help',
         },
@@ -153,21 +145,10 @@ async function interactiveMode() {
     case 'client':
       await startClientMode();
       break;
-    case 'broker':
-      await startBroker();
-      break;
     case 'help':
       showRichHelp();
       break;
   }
-}
-
-// ─── Broker Start ────────────────────────────────────────────
-async function startBroker() {
-  console.log(chalk.cyan('  Starting broker server...'));
-  console.log('');
-  // Dynamically import the server (it self-starts on import)
-  await import('./server.js');
 }
 
 // ─── Commander Setup ─────────────────────────────────────────
@@ -211,20 +192,6 @@ program
       await startClientMode();
     } catch (err) {
       fatal('connect', err);
-    }
-  });
-
-program
-  .command('broker')
-  .description('Start the central broker server')
-  .option('-p, --port <port>', 'Port to listen on', '4000')
-  .action(async (opts) => {
-    try {
-      if (opts.port) process.env.BROKER_PORT = opts.port;
-      showBanner();
-      await startBroker();
-    } catch (err) {
-      fatal('broker', err);
     }
   });
 

@@ -19,7 +19,7 @@ import { decrypt } from '../lib/crypto.js';
 import { trackPID, untrackPID } from '../lib/cleanup.js';
 import { createSpinner, sshSpinner, networkSpinner, fileTransferSpinner, showConnectionTrace, animatedSteps, simulateTransferProgress } from '../lib/animations.js';
 
-const BROKER_URL = process.env.BROKER_URL || 'http://localhost:4000';
+const BROKER_URL = process.env.BROKER_URL || 'https://ipingyou.onrender.com';
 
 /**
  * Resolve a UID to a tunnel URL via the broker.
