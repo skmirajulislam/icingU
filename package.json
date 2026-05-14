@@ -1,17 +1,16 @@
 {
-  "name": "ipingyou",
+  "name": "@miraj181/ipingyou",
   "version": "1.0.0",
   "description": "SecureLink-CLI — Secure peer-to-peer remote access via SSH & Cloudflare Tunnels",
   "main": "src/cli.js",
   "bin": {
-    "ipingyou": "./src/cli.js",
-    "securelink": "./src/cli.js"
+    "ipingyou": "src/cli.js",
+    "securelink": "src/cli.js"
   },
   "files": [
     "src/",
     "README.md",
-    "LICENSE",
-    "render.yaml"
+    "LICENSE"
   ],
   "scripts": {
     "start": "node src/cli.js",

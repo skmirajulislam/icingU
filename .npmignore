@@ -1,0 +1,19 @@
+node_modules/
+.env
+*.log
+.DS_Store
+dist/
+
+# Tests
+test_*.js
+*.test.js
+tests/
+coverage/
+
+# Deployment / Server
+render.yaml
+# Uncomment the line below if you don't want to publish the broker server code
+# src/server.js 
+
+# Other local files
+.npmrc
