@@ -23,7 +23,6 @@ import 'dotenv/config';
 import { Command } from 'commander';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
-import os from 'node:os';
 
 import { detectOS, checkDependencies } from './lib/platform.js';
 import { installShutdownHandlers } from './lib/cleanup.js';
@@ -48,6 +47,34 @@ function showSystemInfo() {
   const osInfo = detectOS();
   const platform = osInfo.isLinux ? '🐧 Linux' : osInfo.isMac ? '🍎 macOS' : '🪟 Windows';
   console.log(chalk.dim(`  ${platform}  |  ${osInfo.arch}  |  ${osInfo.hostname}  |  Node ${process.version}`));
+  console.log('');
+}
+
+function showRichHelp() {
+  console.log(chalk.bold.yellow('  ✨ Welcome to iPingYou SecureLink CLI! ✨'));
+  console.log(chalk.dim('  ───────────────────────────────────────────────────────'));
+  console.log(chalk.cyan('  A zero-knowledge peer-to-peer remote access tool.'));
+  console.log(chalk.cyan('  Securely share your local SSH terminal with anyone over the internet.'));
+  console.log('');
+  
+  console.log(chalk.bold.white('  🚀 Usage Modes:'));
+  console.log(`    ${chalk.green('host')}    : Generates a secure session UID and exposes your local machine.`);
+  console.log(`    ${chalk.blue('connect')} : Prompts for a UID to connect to a remote host.`);
+  console.log(`              ${chalk.dim('Supports Interactive SSH Shell & SCP File Transfers')}`);
+  console.log(`    ${chalk.yellow('broker')}  : Start your own relay server (for self-hosting).`);
+  console.log('');
+  
+  console.log(chalk.bold.white('  🔒 Security Architecture:'));
+  console.log(`    • Cloudflare Tunnels punch through NAT/Firewalls securely.`);
+  console.log(`    • ${chalk.green('End-to-End Encryption')}: Tunnel URLs are AES-256 encrypted locally.`);
+  console.log(`    • The Broker never sees your plaintext URL, only ciphertext.`);
+  console.log('');
+
+  console.log(chalk.bold.white('  💡 Examples:'));
+  console.log(`    $ npx ipingyou          ${chalk.dim('# Interactive wizard (Recommended)')}`);
+  console.log(`    $ npx ipingyou host     ${chalk.dim('# Quick start as Host')}`);
+  console.log(`    $ npx ipingyou connect  ${chalk.dim('# Quick start as Client')}`);
+  console.log(`    $ npx ipingyou broker   ${chalk.dim('# Start Relay')}`);
   console.log('');
 }
 
@@ -103,13 +130,17 @@ async function interactiveMode() {
           value: 'host',
         },
         {
-          name: `${chalk.blue('🌐 Access a Remote Machine')}  ${chalk.dim('— Connect to a host via their UID')}`,
+          name: `${chalk.blue('🌐 Access a Remote Machine')}  ${chalk.dim('— Connect to a host via their UID (SSH/SCP)')}`,
           value: 'client',
         },
         new inquirer.Separator(),
         {
           name: `${chalk.yellow('📡 Start Broker Server')}  ${chalk.dim('— Run the central relay (for self-hosting)')}`,
           value: 'broker',
+        },
+        {
+          name: `${chalk.magenta('📖 Help / Information')}   ${chalk.dim('— Learn how iPingYou works')}`,
+          value: 'help',
         },
       ],
     },
@@ -124,6 +155,9 @@ async function interactiveMode() {
       break;
     case 'broker':
       await startBroker();
+      break;
+    case 'help':
+      showRichHelp();
       break;
   }
 }
@@ -142,7 +176,12 @@ const program = new Command();
 program
   .name('ipingyou')
   .description('SecureLink-CLI — Secure P2P remote access via SSH & Cloudflare Tunnels')
-  .version('1.0.0');
+  .version('1.0.0')
+  .addHelpText('beforeAll', () => {
+    showBanner();
+    showRichHelp();
+    return '';
+  });
 
 program
   .command('host')
@@ -161,7 +200,7 @@ program
 
 program
   .command('connect')
-  .description('Connect to a remote machine via its UID')
+  .description('Connect to a remote machine via its UID (SSH or SCP)')
   .option('-u, --uid <uid>', 'The remote host UID')
   .action(async () => {
     try {

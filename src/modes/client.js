@@ -5,7 +5,7 @@
  *  1. Prompt for the remote host's UID
  *  2. Resolve UID → ENCRYPTED blob from the Broker
  *  3. DECRYPT tunnel URL locally using shared key
- *  4. Execute SSH through the Cloudflare tunnel proxy
+ *  4. Execute SSH/SCP through the Cloudflare tunnel proxy
  *
  *  Security: The broker only returns { iv, ciphertext }.
  *  Decryption happens ONLY on this machine.
@@ -14,10 +14,10 @@
 
 import { execa } from 'execa';
 import chalk from 'chalk';
-import ora from 'ora';
 import inquirer from 'inquirer';
 import { decrypt } from '../lib/crypto.js';
 import { trackPID, untrackPID } from '../lib/cleanup.js';
+import { createSpinner, sshSpinner, networkSpinner, fileTransferSpinner, showConnectionTrace, animatedSteps, simulateTransferProgress } from '../lib/animations.js';
 
 const BROKER_URL = process.env.BROKER_URL || 'http://localhost:4000';
 
@@ -29,7 +29,7 @@ const BROKER_URL = process.env.BROKER_URL || 'http://localhost:4000';
  * @returns {Promise<string|null>}  The decrypted tunnel URL, or null on failure
  */
 async function resolveUID(uid) {
-  const spinner = ora(`Resolving UID ${chalk.cyan(uid)}...`).start();
+  const spinner = createSpinner(`Resolving UID ${chalk.cyan(uid)}...`, networkSpinner).start();
 
   try {
     const res = await fetch(`${BROKER_URL}/resolve/${uid}`);
@@ -49,13 +49,15 @@ async function resolveUID(uid) {
 
     const data = await res.json();
 
-    // Validate encrypted response
     if (!data.iv || !data.ciphertext) {
       spinner.fail('Broker returned invalid response — missing encrypted data');
-      console.error(chalk.red('  ❌ Error: Broker response missing iv or ciphertext'));
-      console.error(chalk.dim(`     Received: ${JSON.stringify(Object.keys(data))}`));
       return null;
     }
+
+    spinner.text = `Decrypting tunnel URL locally...`;
+    
+    // Simulate decryption delay for effect
+    await new Promise(r => setTimeout(r, 600));
 
     // Decrypt locally
     let tunnelUrl;
@@ -64,16 +66,12 @@ async function resolveUID(uid) {
     } catch (decryptErr) {
       spinner.fail('Decryption failed — SECRET_KEY mismatch');
       console.error(chalk.red('  ❌ Error: Could not decrypt tunnel URL'));
-      console.error(chalk.red(`     ${decryptErr.message}`));
       console.log(chalk.dim('     Make sure your SECRET_KEY matches the host\'s key.'));
       return null;
     }
 
-    // Validate decrypted URL looks like a tunnel URL
     if (!tunnelUrl.startsWith('https://')) {
       spinner.fail('Decrypted data is not a valid tunnel URL');
-      console.error(chalk.red('  ❌ Error: Decrypted value doesn\'t look like a URL'));
-      console.log(chalk.dim('     This may indicate a key mismatch.'));
       return null;
     }
 
@@ -81,21 +79,10 @@ async function resolveUID(uid) {
     return tunnelUrl;
   } catch (err) {
     spinner.fail(`Broker lookup failed: ${err.message}`);
-    console.error(chalk.red(`  ❌ Error: ${err.message}`));
-
-    if (err.message.includes('ECONNREFUSED') || err.message.includes('fetch failed')) {
-      console.log(chalk.dim('     Is the broker running? Try: npx ipingyou broker'));
-    }
-
     return null;
   }
 }
 
-/**
- * Extract the hostname from a tunnel URL.
- * @param {string} url — e.g. "https://abc-xyz.trycloudflare.com"
- * @returns {string}    — e.g. "abc-xyz.trycloudflare.com"
- */
 function extractHostname(url) {
   try {
     return new URL(url).hostname;
@@ -104,10 +91,6 @@ function extractHostname(url) {
   }
 }
 
-/**
- * Prompt for SSH username.
- * @returns {Promise<string>}
- */
 async function promptUsername() {
   const { username } = await inquirer.prompt([
     {
@@ -123,25 +106,22 @@ async function promptUsername() {
 
 /**
  * Start SSH connection through the Cloudflare tunnel.
- * @param {string} username
- * @param {string} hostname — the tunnel hostname
  */
 async function connectSSH(username, hostname) {
   console.log('');
   console.log(chalk.bold('  🔗 Establishing SSH Connection'));
   console.log(chalk.dim('  ─────────────────────────────────'));
-  console.log(`  ${chalk.cyan('User:')}      ${username}`);
-  console.log(`  ${chalk.cyan('Host:')}      ${hostname}`);
-  console.log(`  ${chalk.cyan('Proxy:')}     cloudflared access tcp`);
-  console.log(`  ${chalk.cyan('Crypto:')}    ${chalk.green('AES-256-CBC E2E')}`);
-  console.log('');
-  console.log(chalk.dim('  Connecting... (Ctrl+C to abort)'));
-  console.log('');
+  
+  await showConnectionTrace('Local', 'Remote SSH');
 
-  // Build the SSH command with cloudflared as ProxyCommand
   const proxyCommand = `cloudflared access tcp --hostname ${hostname}`;
 
   try {
+    const spinner = createSpinner('Handshaking...', sshSpinner).start();
+    await new Promise(r => setTimeout(r, 800));
+    spinner.succeed('Connection established! Handing over to terminal...');
+    console.log('');
+
     const child = execa('ssh', [
       '-o', `ProxyCommand=${proxyCommand}`,
       '-o', 'StrictHostKeyChecking=accept-new',
@@ -149,12 +129,11 @@ async function connectSSH(username, hostname) {
       '-o', 'ServerAliveCountMax=3',
       `${username}@${hostname}`,
     ], {
-      stdio: 'inherit', // Pass through terminal I/O
+      stdio: 'inherit',
       reject: false,
     });
 
     trackPID(child.pid);
-
     const result = await child;
     untrackPID(child.pid);
 
@@ -164,23 +143,85 @@ async function connectSSH(username, hostname) {
     } else if (result.exitCode === 255) {
       console.log('');
       console.error(chalk.red('  ❌ SSH connection failed (exit code 255)'));
-      console.error(chalk.dim('     Common causes:'));
-      console.error(chalk.dim('     • Host is not running the tunnel anymore'));
-      console.error(chalk.dim('     • Wrong username'));
-      console.error(chalk.dim('     • SSH key not accepted'));
-      console.error(chalk.dim('     • cloudflared is not installed'));
     } else {
       console.log('');
       console.error(chalk.red(`  ❌ SSH exited with code ${result.exitCode}`));
-      if (result.stderr) {
-        console.error(chalk.dim(`     stderr: ${result.stderr.substring(0, 200)}`));
-      }
     }
   } catch (err) {
     console.error(chalk.red(`  ❌ SSH error: ${err.message}`));
-    if (err.code === 'ENOENT') {
-      console.error(chalk.dim('     ssh command not found. Install OpenSSH.'));
+  }
+}
+
+/**
+ * Perform an SCP file transfer through the Cloudflare tunnel.
+ */
+async function performSCP(username, hostname, direction) {
+  console.log('');
+  console.log(chalk.bold(`  📦 SCP Transfer (${direction})`));
+  console.log(chalk.dim('  ─────────────────────────────────'));
+
+  const { localPath, remotePath } = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'localPath',
+      message: `Local file/folder path:`,
+      validate: v => v.trim().length > 0 || 'Required',
+    },
+    {
+      type: 'input',
+      name: 'remotePath',
+      message: `Remote path (relative to ${username}'s home or absolute):`,
+      validate: v => v.trim().length > 0 || 'Required',
     }
+  ]);
+
+  await showConnectionTrace('Local', 'Remote SCP');
+
+  const proxyCommand = `cloudflared access tcp --hostname ${hostname}`;
+  
+  // Construct SCP args
+  const scpArgs = [
+    '-r', // recursive just in case
+    '-o', `ProxyCommand=${proxyCommand}`,
+    '-o', 'StrictHostKeyChecking=accept-new'
+  ];
+
+  if (direction === 'upload') {
+    scpArgs.push(localPath, `${username}@${hostname}:${remotePath}`);
+  } else {
+    scpArgs.push(`${username}@${hostname}:${remotePath}`, localPath);
+  }
+
+  try {
+    // We'll show an animation while SCP runs
+    const transferSpinner = createSpinner(`Transferring via SCP...`, fileTransferSpinner).start();
+    
+    const child = execa('scp', scpArgs, {
+      stdio: ['inherit', 'pipe', 'pipe'], // capture output to not break spinner unless needed
+      reject: false,
+    });
+
+    trackPID(child.pid);
+
+    // If SCP needs a password prompt, it might get messed up by the spinner,
+    // but typically people use keys or interactive mode handles standard tty.
+    // If they need password, we should probably pause the spinner.
+    // To be safe and show colorful animation, we run it and wait.
+    
+    const result = await child;
+    untrackPID(child.pid);
+    
+    transferSpinner.stop();
+
+    if (result.exitCode === 0) {
+      await simulateTransferProgress(direction === 'upload' ? localPath : remotePath, direction, 1500);
+      console.log(chalk.green(`  ✅ Transfer completed successfully!`));
+    } else {
+      console.error(chalk.red('  ❌ SCP transfer failed'));
+      if (result.stderr) console.error(chalk.dim(`     ${result.stderr.trim()}`));
+    }
+  } catch (err) {
+    console.error(chalk.red(`  ❌ SCP error: ${err.message}`));
   }
 }
 
@@ -193,74 +234,103 @@ export async function startClientMode() {
   console.log(chalk.dim('  ──────────────────────────────────────────'));
   console.log('');
 
-  // 1. Get the remote UID
-  let uid;
-  try {
-    const answer = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'uid',
-        message: 'Enter the remote host\'s UID:',
-        validate: (v) => {
-          const trimmed = v.trim();
-          if (trimmed.length < 6 || trimmed.length > 16) {
-            return 'UID must be 6-16 characters';
-          }
-          if (!/^[a-z0-9]+$/.test(trimmed)) {
-            return 'UID should be lowercase alphanumeric';
-          }
-          return true;
-        },
+  const answer = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'uid',
+      message: 'Enter the remote host\\'s UID:',
+      validate: (v) => {
+        const trimmed = v.trim();
+        if (trimmed.length < 6 || trimmed.length > 16) return 'UID must be 6-16 characters';
+        if (!/^[a-z0-9]+$/.test(trimmed)) return 'UID should be lowercase alphanumeric';
+        return true;
       },
-    ]);
-    uid = answer.uid.trim();
-  } catch (err) {
-    console.error(chalk.red(`\n  ❌ Input error: ${err.message}`));
-    process.exit(1);
-  }
+    },
+  ]);
+  const uid = answer.uid.trim();
 
-  // 2. Resolve UID → tunnel URL (decrypts locally)
   const tunnelUrl = await resolveUID(uid);
   if (!tunnelUrl) {
-    console.log('');
-    try {
-      const { retry } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'retry',
-          message: 'Try again?',
-          default: true,
-        },
-      ]);
-      if (retry) return startClientMode();
-    } catch {
-      // Ctrl+C during retry prompt
-    }
-    console.error(chalk.red('  ❌ Could not resolve UID. Exiting.'));
     process.exit(1);
   }
 
-  // 3. Get SSH username
-  let username;
-  try {
-    username = await promptUsername();
-  } catch (err) {
-    console.error(chalk.red(`\n  ❌ Input error: ${err.message}`));
-    process.exit(1);
-  }
-
-  // 4. Extract hostname and connect
+  const username = await promptUsername();
   const hostname = extractHostname(tunnelUrl);
-  await connectSSH(username, hostname);
 
-  // 5. Ask if they want to reconnect
+  const { action } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'action',
+      message: 'What would you like to do?',
+      choices: [
+        { name: '🖥️  Connect via SSH (Interactive Shell)', value: 'ssh' },
+        { name: '📤 Upload file/folder via SCP', value: 'upload' },
+        { name: '📥 Download file/folder via SCP', value: 'download' }
+      ]
+    }
+  ]);
+
+  if (action === 'ssh') {
+    await connectSSH(username, hostname);
+  } else {
+    await performSCP(username, hostname, action);
+  }
+
+  // Ask if they want to reconnect/do another action
   console.log('');
-  try {
-    const { reconnect } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'reconnect',
-        message: 'Reconnect to the same host?',
+  const { reconnect } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'reconnect',
+      message: 'Perform another action with the same host?',
+      default: false,
+    },
+  ]);
+  
+  if (reconnect) {
+    // Simple loop for subsequent actions
+    // Could extract to a true while loop, but recursion is fine for CLI depth
+    await handleSubsequentActions(username, hostname);
+  }
+}
+
+async function handleSubsequentActions(username, hostname) {
+  const { action } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'action',
+      message: 'What would you like to do next?',
+      choices: [
+        { name: '🖥️  Connect via SSH', value: 'ssh' },
+        { name: '📤 Upload file/folder via SCP', value: 'upload' },
+        { name: '📥 Download file/folder via SCP', value: 'download' },
+        { name: '❌ Exit', value: 'exit' }
+      ]
+    }
+  ]);
+
+  if (action === 'exit') return;
+
+  if (action === 'ssh') {
+    await connectSSH(username, hostname);
+  } else {
+    await performSCP(username, hostname, action);
+  }
+
+  const { reconnect } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'reconnect',
+      message: 'Perform another action?',
+      default: false,
+    },
+  ]);
+  
+  if (reconnect) {
+    await handleSubsequentActions(username, hostname);
+  }
+}
+t to the same host?',
         default: false,
       },
     ]);

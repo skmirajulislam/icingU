@@ -15,12 +15,12 @@
 
 import { execa, execaCommand } from 'execa';
 import chalk from 'chalk';
-import ora from 'ora';
 import inquirer from 'inquirer';
 import { generateUID } from '../lib/uid.js';
 import { encrypt } from '../lib/crypto.js';
 import { trackPID, untrackPID, setRevokeOnExit } from '../lib/cleanup.js';
 import { detectOS } from '../lib/platform.js';
+import { createSpinner, cryptoSpinner, tunnelSpinner, networkSpinner, typeText } from '../lib/animations.js';
 
 const BROKER_URL = process.env.BROKER_URL || 'http://localhost:4000';
 
@@ -28,12 +28,11 @@ const BROKER_URL = process.env.BROKER_URL || 'http://localhost:4000';
  * Ensure the local SSH server is running.
  */
 async function ensureSSHRunning() {
-  const spinner = ora('Checking SSH service...').start();
+  const spinner = createSpinner('Checking SSH service...', networkSpinner).start();
   const osInfo = detectOS();
 
   try {
     if (osInfo.isLinux) {
-      // Try systemctl first, fall back to service
       try {
         await execaCommand('systemctl is-active ssh', { reject: true });
         spinner.succeed('SSH service is active');
@@ -43,13 +42,11 @@ async function ensureSSHRunning() {
           await execaCommand('sudo systemctl start ssh', { stdio: 'inherit' });
           spinner.succeed('SSH service started');
         } catch {
-          // Try sshd variant (Arch, Fedora)
           await execaCommand('sudo systemctl start sshd', { stdio: 'inherit' });
           spinner.succeed('SSH service started (sshd)');
         }
       }
     } else if (osInfo.isMac) {
-      // macOS: check Remote Login
       try {
         const { stdout } = await execaCommand('sudo systemsetup -getremotelogin', { reject: false });
         if (stdout.toLowerCase().includes('off')) {
@@ -86,22 +83,20 @@ async function ensureSSHRunning() {
 
 /**
  * Spawn cloudflared tunnel and extract the generated URL.
- * @returns {Promise<{ process: import('execa').ExecaChildProcess, url: string }>}
  */
 async function spawnTunnel() {
-  const spinner = ora('Starting Cloudflare tunnel...').start();
+  const spinner = createSpinner('Starting Cloudflare tunnel...', tunnelSpinner).start();
 
   return new Promise((resolve, reject) => {
     const child = execa('cloudflared', ['tunnel', '--url', 'ssh://localhost:22'], {
       reject: false,
-      all: true, // merge stdout and stderr
+      all: true, 
     });
 
     trackPID(child.pid);
     let tunnelUrl = null;
     let resolved = false;
 
-    // cloudflared prints the URL to stderr
     child.all.on('data', (chunk) => {
       const text = chunk.toString();
       const match = text.match(/https:\/\/[-0-9a-z]+\.trycloudflare\.com/);
@@ -129,7 +124,6 @@ async function spawnTunnel() {
       }
     });
 
-    // Timeout — if no URL after 30s, fail
     setTimeout(() => {
       if (!resolved) {
         spinner.fail('Timeout: No tunnel URL received after 30 seconds');
@@ -141,18 +135,16 @@ async function spawnTunnel() {
 
 /**
  * Encrypt tunnel URL and register with the Central Broker.
- * The broker receives ONLY the encrypted blob — never plaintext.
- *
- * @param {string} uid
- * @param {string} tunnelUrl
- * @returns {Promise<boolean>}
  */
 async function registerWithBroker(uid, tunnelUrl) {
-  const spinner = ora('Encrypting & registering with broker...').start();
+  const spinner = createSpinner('Encrypting tunnel URL...', cryptoSpinner).start();
 
   try {
     // Encrypt the tunnel URL LOCALLY before sending
+    await new Promise(r => setTimeout(r, 600)); // animation effect
     const encrypted = encrypt(tunnelUrl);
+    
+    spinner.text = 'Registering with broker...';
 
     const res = await fetch(`${BROKER_URL}/register`, {
       method: 'POST',
@@ -174,7 +166,7 @@ async function registerWithBroker(uid, tunnelUrl) {
   } catch (err) {
     spinner.fail(`Broker registration failed: ${err.message}`);
     console.error(chalk.red(`  ❌ Error: ${err.message}`));
-    console.log(chalk.yellow('  ⚠️  Remote clients won\'t be able to find you without the broker.'));
+    console.log(chalk.yellow('  ⚠️  Remote clients won\\'t be able to find you without the broker.'));
     console.log(chalk.dim('     Share the tunnel URL directly if needed.'));
     return false;
   }
@@ -182,7 +174,6 @@ async function registerWithBroker(uid, tunnelUrl) {
 
 /**
  * Monitor active connections to port 22.
- * @returns {Promise<string[]>}  List of connected IPs
  */
 async function getConnectedIPs() {
   const osInfo = detectOS();
@@ -210,24 +201,24 @@ async function hostDashboard(uid, tunnelUrl) {
   console.log(chalk.bold('  ╠════════════════════════════════════════════════════╣'));
   console.log(`  ║  ${chalk.cyan('UID:')}        ${chalk.bold.white(uid)}                              ║`);
   console.log(`  ║  ${chalk.cyan('Tunnel:')}     ${chalk.dim(tunnelUrl.substring(0, 40))}  ║`);
-  console.log(`  ║  ${chalk.cyan('Broker:')}     ${chalk.dim(BROKER_URL)}                   ║`);
+  console.log(`  ║  ${chalk.cyan('Broker:')}     ${chalk.dim(BROKER_URL.padEnd(25))}  ║`);
   console.log(`  ║  ${chalk.cyan('Crypto:')}     ${chalk.green('AES-256-CBC E2E')}                      ║`);
   console.log(chalk.bold('  ╠════════════════════════════════════════════════════╣'));
   console.log(`  ║  ${chalk.yellow('Share this UID with the person who needs access')}   ║`);
   console.log(`  ║  ${chalk.dim('Press Ctrl+C to terminate the session')}              ║`);
   console.log(chalk.bold('  ╚════════════════════════════════════════════════════╝'));
   console.log('');
+  
+  await typeText(chalk.dim('  Listening for incoming connections...'), 30);
 
-  // Periodic connection monitoring
   const monitorInterval = setInterval(async () => {
     const ips = await getConnectedIPs();
     if (ips.length > 0) {
       console.log(chalk.cyan(`  📡 Active connections (${ips.length}):`));
       ips.forEach(ip => console.log(chalk.dim(`     → ${ip}`)));
     }
-  }, 15000); // Check every 15 seconds
+  }, 15000);
 
-  // Wait for user action
   const waitForAction = async () => {
     try {
       const { action } = await inquirer.prompt([
@@ -261,12 +252,11 @@ async function hostDashboard(uid, tunnelUrl) {
           return waitForAction();
 
         case 'terminate': {
-          const spinner = ora('Terminating active SSH sessions...').start();
+          const spinner = createSpinner('Terminating active SSH sessions...', networkSpinner).start();
           try {
             if (process.platform === 'win32') {
               await execaCommand('taskkill /F /IM sshd.exe', { reject: false });
             } else {
-              // Kill established SSH sessions, not the daemon
               await execaCommand("pkill -f 'sshd:.*@'", { shell: true, reject: false });
             }
             spinner.succeed('All client SSH sessions terminated');
@@ -281,9 +271,7 @@ async function hostDashboard(uid, tunnelUrl) {
           return;
       }
     } catch (err) {
-      // Handle inquirer being interrupted (Ctrl+C during prompt)
       clearInterval(monitorInterval);
-      console.error(chalk.red(`\n  ❌ Dashboard error: ${err.message}`));
       throw err;
     }
   };
@@ -300,21 +288,34 @@ export async function startHostMode() {
   console.log(chalk.dim('  ─────────────────────────────────────'));
   console.log('');
 
-  // 1. Generate UID
   const uid = generateUID();
   console.log(`  ${chalk.green('✓')} Session UID: ${chalk.bold.white(uid)}`);
   console.log('');
 
-  // 2. Ensure SSH is running
   await ensureSSHRunning();
 
-  // 3. Spawn cloudflared tunnel
   let tunnel;
   try {
     tunnel = await spawnTunnel();
   } catch (err) {
     console.error(chalk.red(`\n  ❌ FATAL: Failed to start tunnel`));
     console.error(chalk.red(`     Error: ${err.message}`));
+    console.log(chalk.dim('     Make sure cloudflared is installed and in your PATH.'));
+    process.exit(1);
+  }
+
+  const registered = await registerWithBroker(uid, tunnel.url);
+  if (!registered) {
+    console.error(chalk.red(`\n  ❌ FATAL: Could not register with broker at ${BROKER_URL}`));
+    console.log(chalk.dim('     Is the broker running? Try: npx ipingyou broker'));
+    process.exit(1);
+  }
+
+  setRevokeOnExit(uid, BROKER_URL);
+
+  await hostDashboard(uid, tunnel.url);
+}
+{err.message}`));
     console.log(chalk.dim('     Make sure cloudflared is installed and in your PATH.'));
     process.exit(1);
   }
