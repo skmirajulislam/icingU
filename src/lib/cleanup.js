@@ -10,6 +10,10 @@
 
 import treeKill from 'tree-kill';
 import chalk from 'chalk';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execaCommand } from 'execa';
 
 /** @type {Set<number>} — Active child PIDs we manage */
 const trackedPIDs = new Set();
@@ -22,6 +26,7 @@ let _brokerUrl = null;
 
 /** @type {Array<() => Promise<void>|void>} — Custom cleanup hooks */
 const _cleanupHooks = [];
+let cleanedUp = false;
 
 /**
  * Register a custom cleanup hook to run on shutdown.
@@ -62,11 +67,10 @@ export function setRevokeOnExit(uid, brokerUrl) {
  * @param {number} pid
  * @returns {Promise<void>}
  */
-function killPID(pid) {
+export function killProcessTree(pid, signal = 'SIGTERM') {
   return new Promise((resolve) => {
-    treeKill(pid, 'SIGTERM', (err) => {
+    treeKill(pid, signal, (err) => {
       if (err) {
-        // Force kill if SIGTERM fails
         treeKill(pid, 'SIGKILL', () => resolve());
       } else {
         resolve();
@@ -79,6 +83,9 @@ function killPID(pid) {
  * Kill all tracked PIDs and revoke UID from broker.
  */
 export async function cleanupAll() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+
   console.log('');
   console.log(chalk.yellow('  🧹 Cleaning up...'));
 
@@ -86,7 +93,7 @@ export async function cleanupAll() {
   const kills = [];
   for (const pid of trackedPIDs) {
     console.log(chalk.dim(`     Killing PID ${pid}...`));
-    kills.push(killPID(pid));
+    kills.push(killProcessTree(pid));
   }
   await Promise.allSettled(kills);
   trackedPIDs.clear();
@@ -136,7 +143,18 @@ export function installShutdownHandlers() {
 
   // Also handle uncaught exceptions gracefully
   process.on('uncaughtException', async (err) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.error(chalk.red(`  💥 Uncaught exception: ${err.message}`));
+    await cleanupAll();
+    process.exit(1);
+  });
+
+  process.on('unhandledRejection', async (reason) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    console.error(chalk.red(`  💥 Unhandled rejection: ${err.message}`));
     await cleanupAll();
     process.exit(1);
   });
@@ -154,11 +172,6 @@ export function getTrackedCount() {
  * Execute Panic Mode (Self-Destruct)
  * Wipes all configs, keys, and forcefully kills associated processes.
  */
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { execaCommand } from 'execa';
-
 export async function executePanicMode() {
   console.log(chalk.bold.red('\n  🚨 INITIATING SECURELINK PANIC MODE 🚨\n'));
   
@@ -167,10 +180,10 @@ export async function executePanicMode() {
   try {
     if (process.platform === 'win32') {
       await execaCommand('taskkill /F /IM cloudflared.exe', { reject: false });
-      await execaCommand('taskkill /F /IM sshd.exe', { reject: false });
     } else {
       await execaCommand('pkill -9 -f cloudflared', { reject: false });
       await execaCommand('pkill -9 -f "sshd:.*@"', { reject: false });
+      await execaCommand('tmux kill-session -t SecureLink_Session', { reject: false });
     }
   } catch {}
 
@@ -193,16 +206,25 @@ export async function executePanicMode() {
     const tmpDir = os.tmpdir();
     const files = fs.readdirSync(tmpDir);
     for (const file of files) {
-      if (file.startsWith('ipingyou_')) {
+      if (file.startsWith('ipingyou_') || file.startsWith('ipingyou-')) {
         fs.unlinkSync(path.join(tmpDir, file));
       }
     }
   } catch {}
 
-  // 4. Scrub SSH authorized_keys if we know we injected
-  // Note: We don't want to wipe the user's whole authorized_keys, but if we have a hook, we could.
-  // We'll skip scraping the actual file here unless we know the exact comment.
-  console.log(chalk.dim('  [4/4] Finalizing cleanup...'));
+  console.log(chalk.dim('  [4/4] Scrubbing injected SSH keys...'));
+  try {
+    const authKeysPath = path.join(os.homedir(), '.ssh', 'authorized_keys');
+    if (fs.existsSync(authKeysPath)) {
+      const current = fs.readFileSync(authKeysPath, 'utf8');
+      const cleaned = current
+        .split(/\r?\n/)
+        .filter(line => !line.includes('ipingyou-ephemeral'))
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n');
+      if (cleaned !== current) fs.writeFileSync(authKeysPath, cleaned);
+    }
+  } catch {}
 
   console.log(chalk.bold.green('\n  ✅ Panic Mode Complete. All traces removed.\n'));
   process.exit(0);

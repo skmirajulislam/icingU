@@ -23,7 +23,7 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 
 import { detectOS, checkDependencies } from './lib/platform.js';
-import { installShutdownHandlers, executePanicMode } from './lib/cleanup.js';
+import { cleanupAll, installShutdownHandlers, executePanicMode } from './lib/cleanup.js';
 import { startHostMode } from './modes/host.js';
 import { startClientMode } from './modes/client.js';
 
@@ -146,18 +146,8 @@ function fatal(context, err) {
     stackLines.forEach(line => console.error(chalk.dim(`     ${line.trim()}`)));
   }
   console.error('');
-  process.exit(1);
+  cleanupAll().finally(() => process.exit(1));
 }
-
-// ─── Process-Level Error Catching ────────────────────────────
-process.on('uncaughtException', (err) => {
-  fatal('uncaughtException', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-  const err = reason instanceof Error ? reason : new Error(String(reason));
-  fatal('unhandledRejection', err);
-});
 
 // ─── Interactive Mode Selection ──────────────────────────────
 async function interactiveMode() {
@@ -225,7 +215,7 @@ const program = new Command();
 program
   .name('ipingyou')
   .description('SecureLink-CLI — Secure P2P remote access via SSH & Cloudflare Tunnels')
-  .version('1.0.0')
+  .version('2.0.11')
   .option('-b, --broker <url>', 'Override the central broker URL')
   .addHelpText('beforeAll', () => {
     showBanner();
@@ -255,7 +245,7 @@ program
   .command('connect')
   .description('Connect to a remote machine via its UID (SSH or SCP)')
   .option('-u, --uid <uid>', 'The remote host UID')
-  .action(async () => {
+  .action(async (commandOptions) => {
     try {
       const opts = program.opts();
       if (opts.broker) process.env.BROKER_URL = opts.broker;
@@ -264,7 +254,7 @@ program
       showSystemInfo();
       installShutdownHandlers();
       await checkDependencies();
-      await startClientMode();
+      await startClientMode({ uid: commandOptions.uid });
     } catch (err) {
       fatal('connect', err);
     }

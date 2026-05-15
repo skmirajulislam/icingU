@@ -18,131 +18,16 @@ import inquirer from 'inquirer';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import crypto from 'node:crypto';
-import { decrypt, encrypt } from '../lib/crypto.js';
-import { trackPID, untrackPID, addCleanupHook } from '../lib/cleanup.js';
+import { cleanupAll, trackPID, untrackPID, addCleanupHook } from '../lib/cleanup.js';
 import { createSpinner, sshSpinner, networkSpinner, fileTransferSpinner, showConnectionTrace, simulateTransferProgress } from '../lib/animations.js';
 import { getConfig, saveAlias } from '../lib/config.js';
+import { pushTelemetry, resolveUID } from '../lib/broker.js';
+import { calculateChecksum } from '../lib/checksum.js';
+import { promptLocalPath, promptRemotePath } from '../lib/path-browser.js';
+import { buildSshArgs, extractHostname, formatScpRemotePath, getSshControlOptions, quoteRemoteShell } from '../lib/ssh.js';
 import open from 'open';
 
 let BROKER_URL = process.env.BROKER_URL || 'https://ipingyou.onrender.com';
-
-/**
- * Gather client hardware telemetry and send securely to broker.
- */
-async function pushTelemetry(uid, password, username) {
-  try {
-    let publicIp = 'Unknown';
-    try {
-      publicIp = await fetch('https://api.ipify.org').then(r => r.text());
-    } catch {}
-
-    const telemetry = {
-      username,
-      ip: publicIp,
-      os: `${os.type()} ${os.release()} (${os.arch()})`,
-      cpu: os.cpus()[0]?.model || 'Unknown CPU',
-      ram: `${Math.round(os.totalmem() / 1024 / 1024 / 1024)} GB`,
-      time: new Date().toLocaleTimeString()
-    };
-
-    const payloadStr = JSON.stringify(telemetry);
-    // Use the same AES password logic to securely encrypt the telemetry blob
-    const { iv, ciphertext, salt } = encrypt(payloadStr, password);
-
-    await fetch(`${BROKER_URL}/client-info/${uid}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ iv, ciphertext, salt }),
-    });
-  } catch {
-    // Fail silently, telemetry is optional
-  }
-}
-
-/**
- * Resolve a UID to a tunnel URL via the broker.
- * The broker returns an encrypted blob; we decrypt locally.
- *
- * @param {string} uid
- * @param {string} password
- * @param {boolean} silent If true, suppresses the spinner animations
- * @returns {object|null} The decrypted payload
- */
-async function resolveUID(uid, password, silent = false) {
-  const spinner = !silent ? createSpinner(`Resolving UID ${chalk.cyan(uid)}...`, networkSpinner).start() : null;
-
-  try {
-    const res = await fetch(`${BROKER_URL}/resolve/${uid}`);
-    
-    if (res.status === 404) {
-      if (spinner) spinner.fail('UID not found — the host may not be online or the session expired');
-      else console.error(chalk.red('  ❌ UID not found or expired.'));
-      return null;
-    }
-    if (res.status === 410) {
-      if (spinner) spinner.fail('UID has expired — ask the host for a new session');
-      else console.error(chalk.red('  ❌ UID expired.'));
-      return null;
-    }
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `HTTP ${res.status}`);
-    }
-
-    const data = await res.json();
-
-    if (!data.iv || !data.ciphertext || !data.salt) {
-      if (spinner) spinner.fail('Broker returned invalid response — missing encrypted data or salt');
-      return null;
-    }
-
-    if (spinner) spinner.text = `Decrypting tunnel URL locally...`;
-
-    // Simulate decryption delay for effect only if not silent
-    if (!silent) await new Promise(r => setTimeout(r, 600));
-
-    // Decrypt locally
-    let decryptedPayload;
-    try {
-      decryptedPayload = decrypt(data.iv, data.ciphertext, password, data.salt);
-    } catch (decryptErr) {
-      if (spinner) spinner.fail('Decryption failed — incorrect password or corrupted data');
-      if (!spinner) console.error(chalk.red('  ❌ Error: Could not decrypt tunnel data. Incorrect password.'));
-      return null;
-    }
-
-    let payloadConfig;
-    try {
-      payloadConfig = JSON.parse(decryptedPayload);
-      // Backwards compatibility if host sent raw URL instead of JSON
-      if (typeof payloadConfig !== 'object' || !payloadConfig.url) {
-        payloadConfig = { url: decryptedPayload, type: 'ssh' };
-      }
-    } catch {
-      payloadConfig = { url: decryptedPayload, type: 'ssh' };
-    }
-
-    if (!payloadConfig.url.startsWith('https://')) {
-      if (spinner) spinner.fail('Decrypted data is not a valid tunnel URL (incorrect password)');
-      return null;
-    }
-
-    if (spinner) spinner.succeed(`Resolved: ${chalk.dim(payloadConfig.url)} ${chalk.green('[decrypted locally]')}`);
-    return payloadConfig;
-  } catch (err) {
-    if (spinner) spinner.fail(`Broker lookup failed: ${err.message}`);
-    return null;
-  }
-}
-
-function extractHostname(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-  }
-}
 
 async function promptUsername() {
   const { username } = await inquirer.prompt([
@@ -167,24 +52,16 @@ async function connectSSH(username, hostname, privateKeyPath) {
 
   await showConnectionTrace('Local', 'Remote SSH');
 
-  const proxyCommand = `cloudflared access tcp --hostname ${hostname}`;
-
   try {
     const spinner = createSpinner('Handshaking...', sshSpinner).start();
     await new Promise(r => setTimeout(r, 800));
     spinner.succeed('Connection established! Handing over to terminal...');
     console.log('');
 
-    const sshArgs = [
-      '-o', `ProxyCommand=${proxyCommand}`,
-      '-o', 'StrictHostKeyChecking=accept-new',
+    const sshArgs = buildSshArgs(hostname, privateKeyPath, [
       '-o', 'ServerAliveInterval=30',
       '-o', 'ServerAliveCountMax=3'
-    ];
-
-    if (privateKeyPath) {
-      sshArgs.push('-i', privateKeyPath, '-o', 'IdentitiesOnly=yes');
-    }
+    ]);
 
     sshArgs.push(`${username}@${hostname}`);
     sshArgs.push('-t', 'tmux new-session -A -s SecureLink_Session 2>/dev/null || exec $SHELL -l');
@@ -213,66 +90,6 @@ async function connectSSH(username, hostname, privateKeyPath) {
   }
 }
 
-async function promptLocalFileBrowser(startPath = process.cwd()) {
-  const items = fs.readdirSync(startPath, { withFileTypes: true });
-  
-  const choices = [
-    { name: '📁 .. (Up a directory)', value: 'UP' },
-    { name: '✅ SELECT CURRENT DIRECTORY', value: 'SELECT_DIR' },
-    new inquirer.Separator(),
-    ...items.map(item => ({
-      name: `${item.isDirectory() ? '📁' : '📄'} ${item.name}`,
-      value: path.join(startPath, item.name),
-      isDir: item.isDirectory()
-    }))
-  ];
-
-  const { selection } = await inquirer.prompt([{
-    type: 'list',
-    name: 'selection',
-    message: `Browse local files [${startPath}]:`,
-    choices,
-    pageSize: 15
-  }]);
-
-  if (selection === 'UP') {
-    return promptLocalFileBrowser(path.dirname(startPath));
-  } else if (selection === 'SELECT_DIR') {
-    return startPath;
-  }
-
-  const stat = fs.statSync(selection);
-  if (stat.isDirectory()) {
-    const { action } = await inquirer.prompt([{
-      type: 'list',
-      name: 'action',
-      message: `Selected Folder: ${path.basename(selection)}`,
-      choices: [
-        { name: '📂 Open Folder', value: 'open' },
-        { name: '✅ Select this Folder for Transfer', value: 'select' }
-      ]
-    }]);
-    
-    if (action === 'open') return promptLocalFileBrowser(selection);
-    return selection;
-  }
-
-  return selection;
-}
-
-/**
- * Calculate SHA-256 of a local file.
- */
-async function calculateChecksum(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
-    stream.on('error', err => resolve(null)); // likely a directory
-    stream.on('data', chunk => hash.update(chunk));
-    stream.on('end', () => resolve(hash.digest('hex')));
-  });
-}
-
 /**
  * Perform an SCP file transfer through the Cloudflare tunnel.
  */
@@ -282,36 +99,15 @@ async function performSCP(username, hostname, direction, privateKeyPath) {
   console.log(chalk.dim('  ─────────────────────────────────'));
 
   let localPath;
-  const { pathMode } = await inquirer.prompt([{
-    type: 'list',
-    name: 'pathMode',
-    message: 'How do you want to select the local path?',
-    choices: [
-      { name: '⌨️  Type path manually', value: 'manual' },
-      { name: '🔍 Browse local files interactively', value: 'browse' }
-    ]
-  }]);
+  let remotePath;
 
-  if (pathMode === 'browse') {
-    localPath = await promptLocalFileBrowser();
+  if (direction === 'upload') {
+    remotePath = await promptRemotePath(username, hostname, privateKeyPath, 'destination');
+    localPath = await promptLocalPath('client file/folder to upload');
   } else {
-    const ans = await inquirer.prompt([{
-      type: 'input',
-      name: 'localPath',
-      message: `Local file/folder path:`,
-      validate: v => v.trim().length > 0 || 'Required',
-    }]);
-    localPath = ans.localPath.trim();
+    localPath = await promptLocalPath('client destination');
+    remotePath = await promptRemotePath(username, hostname, privateKeyPath, 'source');
   }
-
-  const { remotePath } = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'remotePath',
-      message: `Remote path (relative to ${username}'s home or absolute):`,
-      validate: v => v.trim().length > 0 || 'Required',
-    }
-  ]);
 
   await showConnectionTrace('Local', 'Remote SCP');
 
@@ -321,18 +117,21 @@ async function performSCP(username, hostname, direction, privateKeyPath) {
   const scpArgs = [
     '-r', // recursive just in case
     '-o', `ProxyCommand=${proxyCommand}`,
-    '-o', 'StrictHostKeyChecking=accept-new'
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', 'IdentitiesOnly=yes',
+    ...getSshControlOptions(hostname)
   ];
 
   if (privateKeyPath) {
-    scpArgs.push('-i', privateKeyPath, '-o', 'IdentitiesOnly=yes');
+    scpArgs.push('-i', privateKeyPath, '-o', 'IdentityAgent=none');
   }
 
+  const remoteSpec = `${username}@${hostname}:${formatScpRemotePath(remotePath)}`;
   if (direction === 'upload') {
-    scpArgs.push(localPath, `${username}@${hostname}:${remotePath}`);
+    scpArgs.push(localPath, remoteSpec);
   } else {
     // Download: remote source FIRST, then local destination
-    scpArgs.push(`${username}@${hostname}:${remotePath}`, localPath);
+    scpArgs.push(remoteSpec, localPath);
   }
 
   let localHash = null;
@@ -365,10 +164,12 @@ async function performSCP(username, hostname, direction, privateKeyPath) {
         try {
           const sshArgs = [
             '-o', `ProxyCommand=${proxyCommand}`,
-            '-o', 'StrictHostKeyChecking=accept-new'
+            '-o', 'StrictHostKeyChecking=accept-new',
+            '-o', 'IdentitiesOnly=yes',
+            ...getSshControlOptions(hostname)
           ];
-          if (privateKeyPath) sshArgs.push('-i', privateKeyPath, '-o', 'IdentitiesOnly=yes');
-          sshArgs.push(`${username}@${hostname}`, `shasum -a 256 "${remotePath}" || sha256sum "${remotePath}"`);
+          if (privateKeyPath) sshArgs.push('-i', privateKeyPath, '-o', 'IdentityAgent=none');
+          sshArgs.push(`${username}@${hostname}`, `shasum -a 256 ${quoteRemoteShell(remotePath)} || sha256sum ${quoteRemoteShell(remotePath)}`);
           
           const { stdout } = await execa('ssh', sshArgs, { reject: false });
           const remoteHash = stdout.split(' ')[0].trim();
@@ -400,7 +201,7 @@ async function performSCP(username, hostname, direction, privateKeyPath) {
 /**
  * Main Client Mode entry point.
  */
-export async function startClientMode() {
+export async function startClientMode(options = {}) {
   console.log('');
   console.log(chalk.bold.cyan('  🌐 CLIENT MODE — Access a Remote Machine'));
   console.log(chalk.dim('  ──────────────────────────────────────────'));
@@ -463,6 +264,17 @@ export async function startClientMode() {
     }
   }
 
+  if (!targetUid && options.uid) {
+    targetUid = options.uid.trim();
+    const { password } = await inquirer.prompt([{
+      type: 'password',
+      name: 'password',
+      message: 'Enter the session password:',
+      validate: (v) => v.trim().length > 0 || 'Password is required to decrypt',
+    }]);
+    targetPassword = password.trim();
+  }
+
   if (!targetUid) {
     const answer = await inquirer.prompt([
       {
@@ -487,7 +299,7 @@ export async function startClientMode() {
     targetPassword = answer.password.trim();
   }
 
-  const payload = await resolveUID(targetUid, targetPassword);
+  const payload = await resolveUID(BROKER_URL, targetUid, targetPassword);
   if (!payload) {
     process.exit(1);
   }
@@ -551,7 +363,7 @@ export async function startClientMode() {
   }
 
   // Push secure telemetry to host
-  await pushTelemetry(targetUid, targetPassword, username);
+  await pushTelemetry(BROKER_URL, targetUid, targetPassword, username);
 
   const { action } = await inquirer.prompt([
     {
@@ -591,13 +403,15 @@ export async function startClientMode() {
   if (reconnect) {
     await handleSubsequentActions(username, hostname, privateKeyPath, targetUid, targetPassword);
   }
+
+  await cleanupAll();
 }
 
 async function handleClientChat(uid, password, cachedChatUrl) {
   let chatUrl = cachedChatUrl;
   const spinner = createSpinner('Checking for active chat room...', networkSpinner).start();
   
-  const payload = await resolveUID(uid, password, true); // true = silent if possible, or just re-resolve
+  const payload = await resolveUID(BROKER_URL, uid, password, true); // true = silent if possible, or just re-resolve
   if (payload && payload.chatUrl) {
     chatUrl = payload.chatUrl;
   }
@@ -681,21 +495,13 @@ async function performReverseForward(username, hostname, privateKeyPath) {
     }
   ]);
 
-  const proxyCmd = `cloudflared access ssh --hostname ${hostname}`;
   const portMap = `${remotePort}:localhost:${localPort}`;
 
-  const sshArgs = [
+  const sshArgs = buildSshArgs(hostname, privateKeyPath, [
     '-N',
     '-R', portMap,
-    '-o', `ProxyCommand=${proxyCmd}`,
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
-  ];
-
-  if (privateKeyPath) {
-    sshArgs.push('-i', privateKeyPath);
-    sshArgs.push('-o', 'IdentitiesOnly=yes');
-  }
+    '-o', 'ExitOnForwardFailure=yes',
+  ]);
   sshArgs.push(`${username}@${hostname}`);
 
   console.log('');

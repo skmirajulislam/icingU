@@ -15,8 +15,8 @@ function ensureConfig() {
 }
 
 export function getConfig() {
-  ensureConfig();
   try {
+    ensureConfig();
     return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   } catch {
     return { aliases: {}, settings: {} };
@@ -24,8 +24,12 @@ export function getConfig() {
 }
 
 export function saveConfig(config) {
-  ensureConfig();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  try {
+    ensureConfig();
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  } catch (err) {
+    throw new Error(`Could not save config: ${err.message}`);
+  }
 }
 
 export function saveAlias(aliasName, data) {

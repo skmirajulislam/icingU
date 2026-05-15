@@ -4,7 +4,7 @@
  * Requires: broker running on localhost:4000
  */
 
-import { encrypt, decrypt } from './src/lib/crypto.js';
+import { encrypt, decrypt } from '../src/lib/crypto.js';
 
 const BROKER = 'http://localhost:4000';
 
@@ -34,14 +34,15 @@ await test('Health check', async () => {
 
 // 2. Host encrypts locally, registers encrypted blob
 const tunnelUrl = 'https://secret-tunnel-xyz.trycloudflare.com';
-const encrypted = encrypt(tunnelUrl);
+const password = 'test-password';
+const encrypted = encrypt(tunnelUrl, password);
 const uid = 'test' + Date.now().toString(36).slice(-4);
 
 await test(`Register encrypted payload (UID: ${uid})`, async () => {
   const res = await fetch(`${BROKER}/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uid, iv: encrypted.iv, ciphertext: encrypted.ciphertext }),
+    body: JSON.stringify({ uid, iv: encrypted.iv, ciphertext: encrypted.ciphertext, salt: encrypted.salt }),
   });
   const data = await res.json();
   if (data.status !== 'registered') throw new Error(`Expected "registered", got "${data.status}"`);
@@ -55,6 +56,7 @@ await test('Resolve returns encrypted blob (no plaintext)', async () => {
   // MUST have iv + ciphertext
   if (!data.iv) throw new Error('Response missing iv');
   if (!data.ciphertext) throw new Error('Response missing ciphertext');
+  if (!data.salt) throw new Error('Response missing salt');
 
   // MUST NOT have a plaintext tunnelUrl
   if (data.tunnelUrl) throw new Error('SECURITY FAIL: Broker returned plaintext tunnelUrl!');
@@ -64,7 +66,7 @@ await test('Resolve returns encrypted blob (no plaintext)', async () => {
 await test('Client decrypts locally — correct URL', async () => {
   const res = await fetch(`${BROKER}/resolve/${uid}`);
   const data = await res.json();
-  const decryptedUrl = decrypt(data.iv, data.ciphertext);
+  const decryptedUrl = decrypt(data.iv, data.ciphertext, password, data.salt);
 
   if (decryptedUrl !== tunnelUrl) {
     throw new Error(`Decrypted "${decryptedUrl}" !== original "${tunnelUrl}"`);
@@ -88,35 +90,45 @@ await test('Reject invalid IV format', async () => {
   const res = await fetch(`${BROKER}/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uid: 'badiv123', iv: 'ZZZZ', ciphertext: 'abc' }),
+    body: JSON.stringify({ uid: 'badiv123', iv: 'ZZZZ', ciphertext: 'abc', salt: encrypted.salt }),
   });
   if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
 });
 
-// 7. Reject short UID
+// 7. Reject invalid salt
+await test('Reject invalid salt format', async () => {
+  const res = await fetch(`${BROKER}/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid: 'badsalt1', iv: encrypted.iv, ciphertext: encrypted.ciphertext, salt: 'ZZZZ' }),
+  });
+  if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
+});
+
+// 8. Reject short UID
 await test('Reject short UID', async () => {
   const res = await fetch(`${BROKER}/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uid: 'ab', iv: encrypted.iv, ciphertext: encrypted.ciphertext }),
+    body: JSON.stringify({ uid: 'ab', iv: encrypted.iv, ciphertext: encrypted.ciphertext, salt: encrypted.salt }),
   });
   if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
 });
 
-// 8. 404 on missing UID
+// 9. 404 on missing UID
 await test('404 on missing UID', async () => {
   const res = await fetch(`${BROKER}/resolve/nonexist99`);
   if (res.status !== 404) throw new Error(`Expected 404, got ${res.status}`);
 });
 
-// 9. Revoke works
+// 10. Revoke works
 await test(`Revoke UID: ${uid}`, async () => {
   const res = await fetch(`${BROKER}/revoke/${uid}`, { method: 'DELETE' });
   const data = await res.json();
   if (data.status !== 'revoked') throw new Error(`Expected "revoked", got "${data.status}"`);
 });
 
-// 10. 404 after revoke
+// 11. 404 after revoke
 await test('404 after revoke', async () => {
   const res = await fetch(`${BROKER}/resolve/${uid}`);
   if (res.status !== 404) throw new Error(`Expected 404, got ${res.status}`);
@@ -124,7 +136,7 @@ await test('404 after revoke', async () => {
 
 console.log('');
 console.log('══════════════════════════════════════════════════════════');
-console.log('  ✅ ALL 10 TESTS PASSED — E2E encryption verified');
+console.log('  ✅ ALL 11 TESTS PASSED — E2E encryption verified');
 console.log('     Broker is zero-knowledge: never sees plaintext');
 console.log('══════════════════════════════════════════════════════════');
 console.log('');

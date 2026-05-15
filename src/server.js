@@ -137,8 +137,13 @@ app.post('/register', strictLimiter, (req, res) => {
       return res.status(400).json({ error: 'Invalid IV format (expected 32 hex chars)' });
     }
 
+    if (!/^[a-f0-9]{32}$/i.test(salt)) {
+      recordViolation(req);
+      return res.status(400).json({ error: 'Invalid salt format (expected 32 hex chars)' });
+    }
+
     // Validate ciphertext is non-empty base64
-    if (typeof ciphertext !== 'string' || ciphertext.length === 0) {
+    if (typeof ciphertext !== 'string' || ciphertext.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(ciphertext)) {
       recordViolation(req);
       return res.status(400).json({ error: 'Invalid ciphertext' });
     }

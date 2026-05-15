@@ -21,14 +21,27 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
 import { generateUID } from '../lib/uid.js';
-import { encrypt, decrypt } from '../lib/crypto.js';
-import { trackPID, untrackPID, setRevokeOnExit, addCleanupHook } from '../lib/cleanup.js';
+import { decrypt } from '../lib/crypto.js';
+import { cleanupAll, killProcessTree, trackPID, untrackPID, setRevokeOnExit, addCleanupHook } from '../lib/cleanup.js';
 import { detectOS } from '../lib/platform.js';
-import { createSpinner, cryptoSpinner, tunnelSpinner, networkSpinner, typeText } from '../lib/animations.js';
+import { createSpinner, networkSpinner, typeText } from '../lib/animations.js';
 import { startChatServer, openLocalChatUI } from '../lib/chat.js';
+import { spawnTunnelSupervised } from '../lib/tunnel.js';
+import { pingBroker, registerWithBroker } from '../lib/broker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let BROKER_URL = process.env.BROKER_URL || 'https://ipingyou.onrender.com';
+
+async function waitForValue(getValue, timeoutMs, label) {
+  const startedAt = Date.now();
+  while (!getValue()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return getValue();
+}
 
 /**
  * Ensure the local SSH server is running.
@@ -131,75 +144,6 @@ async function ensureTmuxInstalled() {
   }
 }
 
-/**
- * Supervise cloudflared tunnel, restarting it if it crashes.
- */
-async function spawnTunnelSupervised(targetUrl, onUrlGenerated) {
-  let isShuttingDown = false;
-  let activeChild = null;
-
-  const loop = async () => {
-    while (!isShuttingDown) {
-      const spinner = createSpinner('Starting Cloudflare tunnel...', tunnelSpinner).start();
-      
-      await new Promise((resolve) => {
-        activeChild = execa('cloudflared', ['tunnel', '--url', targetUrl], {
-          reject: false,
-          all: true,
-        });
-
-        trackPID(activeChild.pid);
-        let tunnelUrl = null;
-        let resolved = false;
-
-        activeChild.all.on('data', (chunk) => {
-          const text = chunk.toString();
-          const match = text.match(/https:\/\/[-0-9a-z]+\.trycloudflare\.com/);
-          if (match && !resolved) {
-            tunnelUrl = match[0];
-            resolved = true;
-            spinner.succeed(`Tunnel active: ${chalk.cyan(tunnelUrl)}`);
-            onUrlGenerated(tunnelUrl);
-          }
-        });
-
-        activeChild.on('exit', (code) => {
-          untrackPID(activeChild.pid);
-          if (!resolved) {
-            spinner.fail('Cloudflare tunnel exited before generating URL');
-          } else if (!isShuttingDown) {
-            console.log(chalk.yellow(`\n  ⚠️  Tunnel disconnected (code ${code}). Restarting...`));
-          }
-          resolve(); // Let the loop continue to restart
-        });
-
-        activeChild.on('error', (err) => {
-          untrackPID(activeChild.pid);
-          spinner.fail(`Tunnel error: ${err.message}`);
-          resolve();
-        });
-      });
-
-      if (!isShuttingDown) {
-        // Wait a bit before restarting to avoid tight loop
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-  };
-
-  loop(); // Fire and forget the supervisor loop
-
-  return {
-    kill: () => {
-      isShuttingDown = true;
-      if (activeChild) {
-        untrackPID(activeChild.pid);
-        try { process.kill(activeChild.pid); } catch { /* ignore */ }
-      }
-    }
-  };
-}
-
 // ─── Ephemeral SSH Key Management ────────────────────────────
 async function generateEphemeralKey() {
   const tmpDir = os.tmpdir();
@@ -235,21 +179,6 @@ async function removePublicKey(authKeysPath, pubKey) {
 }
 
 /**
- * Ping the broker to see if it's online.
- */
-async function pingBroker(url) {
-  try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${url}/health`, { signal: controller.signal });
-    clearTimeout(id);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Auto-spawn a Private Broker locally and wrap it in a Cloudflare tunnel.
  */
 async function spawnPrivateBroker() {
@@ -258,9 +187,19 @@ async function spawnPrivateBroker() {
   // 1. Spawn the broker server process
   const brokerProcess = execa('node', [path.join(__dirname, '../server.js')], {
     env: { ...process.env, PORT: '4040' },
-    reject: false
+    reject: false,
+    all: true,
   });
   trackPID(brokerProcess.pid);
+
+  let brokerExited = false;
+  let brokerOutput = '';
+  brokerProcess.all?.on('data', chunk => {
+    brokerOutput += chunk.toString();
+  });
+  brokerProcess.on('exit', () => {
+    brokerExited = true;
+  });
 
   // 2. Wrap it in a cloudflare tunnel
   let brokerTunnelUrl = null;
@@ -268,9 +207,12 @@ async function spawnPrivateBroker() {
     brokerTunnelUrl = newUrl;
   });
 
-  while (!brokerTunnelUrl) {
-    await new Promise(r => setTimeout(r, 100));
-  }
+  await waitForValue(() => {
+    if (brokerExited) {
+      throw new Error(`Private broker exited before tunnel was ready${brokerOutput ? `: ${brokerOutput.trim()}` : ''}`);
+    }
+    return brokerTunnelUrl;
+  }, 30000, 'Private broker tunnel startup');
 
   console.log(chalk.green(`  ✅ Private Broker Active: ${chalk.bold.cyan(brokerTunnelUrl)}\n`));
   
@@ -278,51 +220,9 @@ async function spawnPrivateBroker() {
     url: brokerTunnelUrl,
     kill: () => {
       privateBrokerTunnelProcess.kill();
-      untrackPID(brokerProcess.pid);
-      try { process.kill(brokerProcess.pid); } catch { /* ignore */ }
+      killProcessTree(brokerProcess.pid).finally(() => untrackPID(brokerProcess.pid));
     }
   };
-}
-
-/**
- * Encrypt tunnel details and register with the Central Broker.
- */
-async function registerWithBroker(uid, tunnelUrl, password, serviceConfig) {
-  const spinner = createSpinner('Encrypting session data...', cryptoSpinner).start();
-
-  try {
-    // Encrypt the JSON payload LOCALLY before sending
-    await new Promise(r => setTimeout(r, 600)); // animation effect
-    const payload = JSON.stringify({ url: tunnelUrl, ...serviceConfig });
-    const encrypted = encrypt(payload, password);
-
-    spinner.text = 'Registering with broker...';
-
-    const res = await fetch(`${BROKER_URL}/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        uid,
-        iv: encrypted.iv,
-        ciphertext: encrypted.ciphertext,
-        salt: encrypted.salt,
-      }),
-    });
-
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `HTTP ${res.status}`);
-    }
-
-    spinner.succeed(`Registered with broker ${chalk.dim(`(${BROKER_URL})`)} ${chalk.green('[E2E encrypted]')}`);
-    return true;
-  } catch (err) {
-    spinner.fail(`Broker registration failed: ${err.message}`);
-    console.error(chalk.red(`  ❌ Error: ${err.message}`));
-    console.log(chalk.yellow('  ⚠️  Remote clients won\'t be able to find you without the broker.'));
-    console.log(chalk.dim('     Share the tunnel URL directly if needed.'));
-    return false;
-  }
 }
 
 // Monitor active connections removed (replaced by Telemetry)
@@ -397,7 +297,7 @@ async function hostDashboard(uid, tunnelUrl, password, serviceConfig, tunnelProc
                chatTunnelProcess = null;
                chatServerInstance = null;
                delete serviceConfig.chatUrl;
-               await registerWithBroker(uid, tunnelUrl, password, serviceConfig);
+               await registerWithBroker(BROKER_URL, uid, tunnelUrl, password, serviceConfig);
                renderDashboard();
              }
           });
@@ -405,13 +305,11 @@ async function hostDashboard(uid, tunnelUrl, password, serviceConfig, tunnelProc
           console.log(chalk.dim('  Provisioning Cloudflare tunnel for chat...'));
           chatTunnelProcess = await spawnTunnelSupervised(`http://localhost:${chatServerInstance.port}`, async (newUrl) => {
             serviceConfig.chatUrl = newUrl;
-            await registerWithBroker(uid, tunnelUrl, password, serviceConfig);
+            await registerWithBroker(BROKER_URL, uid, tunnelUrl, password, serviceConfig);
             renderDashboard();
           });
 
-          while (!serviceConfig.chatUrl) {
-            await new Promise(r => setTimeout(r, 100));
-          }
+          await waitForValue(() => serviceConfig.chatUrl, 30000, 'Chat tunnel startup');
 
           console.log(chalk.green('  ✅ Chat Room Live! Clients can now join.'));
           await openLocalChatUI(chatServerInstance.port, password);
@@ -427,14 +325,24 @@ async function hostDashboard(uid, tunnelUrl, password, serviceConfig, tunnelProc
           console.log('');
           console.log(chalk.bold.cyan('  📺 Terminal Mirroring'));
           console.log(chalk.dim('  ──────────────────────────────────────'));
-          console.log(chalk.dim('  Attaching to client session. Press Ctrl+b then d to detach gracefully!'));
-          console.log(chalk.dim('  If no client has connected yet or tmux is missing, this will fail.'));
+          console.log(chalk.dim('  Attaching to the tmux session created by an interactive SSH client.'));
+          console.log(chalk.dim('  Press Ctrl+b then d to detach gracefully.'));
           console.log('');
           
           try {
+            await execaCommand('tmux -V', { reject: true });
+            const sessionCheck = await execa('tmux', ['has-session', '-t', 'SecureLink_Session'], { reject: false });
+            if (sessionCheck.exitCode !== 0) {
+              console.log(chalk.yellow('  ⚠️  No mirrored terminal session is active yet.'));
+              console.log(chalk.dim('     A client must choose "Connect via SSH" first. SCP-only clients do not create a tmux session.'));
+              console.log(chalk.dim('     tmux is needed on the host machine only; the client does not need tmux.'));
+              return waitForAction();
+            }
             await execaCommand('tmux attach -t SecureLink_Session -r', { stdio: 'inherit' });
-          } catch {
-            console.log(chalk.yellow('  ⚠️  Could not attach. Ensure a client is connected and tmux is installed.'));
+          } catch (err) {
+            console.log(chalk.yellow('  ⚠️  Could not attach to tmux.'));
+            console.log(chalk.dim(`     ${err.message}`));
+            console.log(chalk.dim('     Terminal mirroring requires tmux on the host machine and an active interactive SSH client.'));
           }
           return waitForAction();
         }
@@ -476,16 +384,17 @@ async function hostDashboard(uid, tunnelUrl, password, serviceConfig, tunnelProc
         }
 
         case 'reregister':
-          await registerWithBroker(uid, tunnelUrl, password, serviceConfig);
+          await registerWithBroker(BROKER_URL, uid, tunnelUrl, password, serviceConfig);
           return waitForAction();
 
         case 'terminate': {
           const spinner = createSpinner('Terminating active SSH sessions...', networkSpinner).start();
           try {
             if (process.platform === 'win32') {
-              await execaCommand('taskkill /F /IM sshd.exe', { reject: false });
+              await execaCommand('powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"name = \'sshd.exe\'\\" | Where-Object { $_.CommandLine -match \'sshd:.*@\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"', { reject: false });
             } else {
               await execaCommand("pkill -f 'sshd:.*@'", { shell: true, reject: false });
+              await execaCommand('tmux kill-session -t SecureLink_Session', { reject: false });
             }
             spinner.succeed('All client SSH sessions terminated');
           } catch {
@@ -495,9 +404,10 @@ async function hostDashboard(uid, tunnelUrl, password, serviceConfig, tunnelProc
         }
 
         case 'exit':
-          if (tunnelProcess) tunnelProcess.kill();
           if (chatTunnelProcess) chatTunnelProcess.kill();
           if (global.privateBrokerInstance) global.privateBrokerInstance.kill();
+          if (tunnelProcess) tunnelProcess.kill();
+          await cleanupAll();
           return;
       }
     } catch (err) {
@@ -638,7 +548,7 @@ export async function startHostMode() {
   const tunnelProcess = await spawnTunnelSupervised(targetUrl, async (newUrl) => {
     tunnelUrl = newUrl;
     // Register or re-register with broker when tunnel is spawned/respawned
-    const registered = await registerWithBroker(uid, tunnelUrl, password, serviceConfig);
+    const registered = await registerWithBroker(BROKER_URL, uid, tunnelUrl, password, serviceConfig);
     if (!registered) {
       console.error(chalk.red(`\n  ❌ FATAL: Could not register with broker at ${BROKER_URL}`));
       process.exit(1);
@@ -646,9 +556,7 @@ export async function startHostMode() {
   });
 
   // Wait for the first URL to be generated before showing the dashboard
-  while (!tunnelUrl) {
-    await new Promise(r => setTimeout(r, 100));
-  }
+  await waitForValue(() => tunnelUrl, 30000, 'Cloudflare tunnel startup');
 
   setRevokeOnExit(uid, BROKER_URL);
 
