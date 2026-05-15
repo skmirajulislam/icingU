@@ -74,7 +74,13 @@ graph LR
 
 ---
 
-## 🛠 Prerequisites
+## 🛡️ Security Scanner Disclaimer
+
+Because **iPingYou** is a powerful remote administration tool with features like background daemonization (via PM2), secure shell execution (`execa`), and anti-forensics capabilities (`panic` mode), automated security scanners (such as Socket.dev or enterprise EDRs) may flag this package as a **potential risk** or **malware-like**. 
+
+These alerts (e.g., "AI-detected potential code anomaly", "Shell access", "Network access") are **expected behavior** for a peer-to-peer tunneling utility. The source code is entirely open-source, heavily documented, and uses zero-knowledge encryption to ensure your data is safe.
+
+---
 
 | Tool | Required | Installation Guide |
 |------|----------|--------------------|
