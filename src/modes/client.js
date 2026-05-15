@@ -124,14 +124,14 @@ async function resolveUID(uid, password, silent = false) {
     }
 
     if (!payloadConfig.url.startsWith('https://')) {
-      spinner.fail('Decrypted data is not a valid tunnel URL (incorrect password)');
+      if (spinner) spinner.fail('Decrypted data is not a valid tunnel URL (incorrect password)');
       return null;
     }
 
-    spinner.succeed(`Resolved: ${chalk.dim(payloadConfig.url)} ${chalk.green('[decrypted locally]')}`);
+    if (spinner) spinner.succeed(`Resolved: ${chalk.dim(payloadConfig.url)} ${chalk.green('[decrypted locally]')}`);
     return payloadConfig;
   } catch (err) {
-    spinner.fail(`Broker lookup failed: ${err.message}`);
+    if (spinner) spinner.fail(`Broker lookup failed: ${err.message}`);
     return null;
   }
 }

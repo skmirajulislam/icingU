@@ -190,6 +190,7 @@ const HTML_CONTENT = `
       input.focus();
       
       const encPayload = await encryptPayload({ type: 'join', sender: username });
+      ws.send(JSON.stringify({ type: 'join_event', username })); // Send unencrypted name for sidebar
       ws.send(JSON.stringify({ type: 'e2e', payload: encPayload }));
     };
 
@@ -291,8 +292,8 @@ export async function startChatServer(onClose) {
             // E2E messages just get forwarded to all clients
             broadcastMsg(data);
           } else if (data.type === 'join_event') {
-             // For updating participant count dynamically if we wanted to extract sender, 
-             // but since E2E hides sender, we rely on connection count
+            clients.set(ws, data.username || `User_${Math.floor(Math.random()*1000)}`);
+            broadcastState();
           } else if (data.type === 'host_close') {
             broadcastMsg({ type: 'close' });
             server.close();
@@ -304,16 +305,9 @@ export async function startChatServer(onClose) {
       });
 
       ws.on('close', () => {
-        // Since we can't read the encrypted username, we just update state
         clients.delete(ws);
         broadcastState();
       });
-    });
-
-    // When connection opens, just assign a generic ID to count them
-    wss.on('connection', (ws) => {
-      clients.set(ws, `User_${Math.floor(Math.random()*1000)}`);
-      broadcastState();
     });
 
     server.listen(0, '127.0.0.1', () => {
