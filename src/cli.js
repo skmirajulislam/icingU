@@ -29,11 +29,58 @@ import { startClientMode } from './modes/client.js';
 
 
 // ─── ASCII Banner ────────────────────────────────────────────
+const wolfAscii = [
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⠁⠸⢳⡄⠀⠀⠀⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⠃⠀⠀⢸⠸⠀⡠⣄⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡠⠃⠀⠀⢠⣞⣀⡿⠀⠀⣧⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣠⡖⠁⠀⠀⠀⢸⠈⢈⡇⠀⢀⡏⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⠀⠀⡴⠩⢠⡴⠀⠀⠀⠀⠀⠈⡶⠉⠀⠀⡸⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⠀⢀⠎⢠⣇⠏⠀⠀⠀⠀⠀⠀⠀⠁⠀⢀⠄⡇⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⠀⢠⠏⠀⢸⣿⣴⠀⠀⠀⠀⠀⠀⣆⣀⢾⢟⠴⡇⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⠀⢀⣿⠀⠠⣄⠸⢹⣦⠀⠀⡄⠀⠀⢋⡟⠀⠀⠁⣇⠀⠀⠀⠀⠀",
+  "⠀⠀⠀⠀⢀⡾⠁⢠⠀⣿⠃⠘⢹⣦⢠⣼⠀⠀⠉⠀⠀⠀⠀⢸⡀⠀⠀⠀⠀",
+  "⠀⠀⢀⣴⠫⠤⣶⣿⢀⡏⠀⠀⠘⢸⡟⠋⠀⠀⠀⠀⠀⠀⠀⠀⢳⠀⠀⠀⠀",
+  "⠐⠿⢿⣿⣤⣴⣿⣣⢾⡄⠀⠀⠀⠀⠳⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢣⠀⠀⠀",
+  "⠀⠀⠀⣨⣟⡍⠉⠚⠹⣇⡄⠀⠀⠀⠀⠀⠀⠀⠀⠈⢦⠀⠀⢀⡀⣾⡇⠀⠀",
+  "⠀⠀⢠⠟⣹⣧⠃⠀⠀⢿⢻⡀⢄⠀⠀⠀⠀⠐⣦⡀⣸⣆⠀⣾⣧⣯⢻⠀⠀",
+  "⠀⠀⠘⣰⣿⣿⡄⡆⠀⠀⠀⠳⣼⢦⡘⣄⠀⠀⡟⡷⠃⠘⢶⣿⡎⠻⣆⠀⠀",
+  "⠀⠀⠀⡟⡿⢿⡿⠀⠀⠀⠀⠀⠙⠀⠻⢯⢷⣼⠁⠁⠀⠀⠀⠙⢿⡄⡈⢆⠀",
+  "⠀⠀⠀⠀⡇⣿⡅⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠦⠀⠀⠀⠀⠀⠀⡇⢹⢿⡀",
+  "⠀⠀⠀⠀⠁⠛⠓⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠼⠇⠁"
+];
+
+const titleAscii = [
+  "   ___  ____   ___  _   _   ____        _   _  ",
+  "  |_ _||  _ \\ |_ _|| \\ | | / ___|      | | | | ",
+  "   | | | |_) | | | |  \\| || |  _  ____ | | | | ",
+  "   | | |  __/  | | | |\\  || |_| ||____|| |_| | ",
+  "  |___||_|    |___||_| \\_| \\____|       \\___/  "
+];
+
 function showBanner() {
+  console.log('');
+  
+  const darkBlueGray = chalk.hex('#4B5563').bold;
+  const pink = chalk.hex('#FF69B4').bold;
+  const titleStartLine = 6;
+  
+  wolfAscii.forEach((line, index) => {
+    let out = chalk.dim(line);
+    if (index >= titleStartLine && index < titleStartLine + titleAscii.length) {
+       const titleLine = titleAscii[index - titleStartLine];
+       const ipingPart = titleLine.substring(0, 36);
+       const uPart = titleLine.substring(36);
+       out += darkBlueGray(ipingPart) + pink(uPart);
+    }
+    console.log('  ' + out);
+  });
+  
   console.log('');
   console.log(chalk.cyan.bold('  ╔═══════════════════════════════════════════╗'));
   console.log(chalk.cyan.bold('  ║                                           ║'));
   console.log(chalk.cyan.bold('  ║') + chalk.white.bold('     🔗  iPingYou  —  SecureLink CLI  ') + chalk.cyan.bold('     ║'));
+  console.log(chalk.cyan.bold('  ║') + chalk.yellow.bold('           by SK MIRAJUL ISLAM         ') + chalk.cyan.bold('    ║'));
   console.log(chalk.cyan.bold('  ║                                           ║'));
   console.log(chalk.cyan.bold('  ║') + chalk.dim('   Secure P2P Remote Access via SSH +  ') + chalk.cyan.bold('    ║'));
   console.log(chalk.cyan.bold('  ║') + chalk.dim('   Cloudflare Tunnels  |  AES-256-CBC ') + chalk.cyan.bold('    ║'));
