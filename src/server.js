@@ -10,13 +10,78 @@
  */
 
 import express from 'express';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 
 const app = express();
-app.use(express.json());
+
+// ─── Process-Level Error Handling ────────────────────────────
+process.on('uncaughtException', (err) => {
+  console.error('💥 Uncaught Exception:', err.message);
+  if (err.stack) console.error(err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// ─── Basic Security Headers ──────────────────────────────────
+app.use(helmet());
+app.use(express.json({ limit: '10kb' })); // Limit JSON payload size to prevent payload-based DoS
+
+// ─── Rate Limiters ───────────────────────────────────────────
+// Trust proxy is required if the server is behind a reverse proxy (like Render, Heroku, Cloudflare)
+app.set('trust proxy', 1);
+
+// General rate limiter for all requests (100 reqs per 15 minutes per IP)
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests from this IP, please try again after 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(generalLimiter);
+
+// Stricter rate limiter for registration/revocation endpoints (e.g. 20 reqs per 15 mins)
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many registration/revocation requests. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ─── Active Defense & IP Blacklisting (IDS) ──────────────────
+const ipViolations = new Map(); // ip → violation_count
+const blacklistedIPs = new Set();
+const VIOLATION_THRESHOLD = 5; // Block IP after 5 malicious requests
+
+app.use((req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (blacklistedIPs.has(ip)) {
+    console.warn(`🛡️  Dropped traffic from blacklisted IP: ${ip}`);
+    return res.status(403).json({ error: 'Your IP has been banned due to suspicious activity.' });
+  }
+  next();
+});
+
+function recordViolation(req) {
+  const ip = req.ip || req.connection.remoteAddress;
+  const count = (ipViolations.get(ip) || 0) + 1;
+  ipViolations.set(ip, count);
+  console.warn(`🚨 Violation recorded for IP ${ip} (${count}/${VIOLATION_THRESHOLD})`);
+  
+  if (count >= VIOLATION_THRESHOLD) {
+    blacklistedIPs.add(ip);
+    console.error(`💥 HACKING DETECTED: Auto-banned IP ${ip} to defend server.`);
+  }
+}
 
 // ─── In-memory store — auto-expire after TTL ─────────────────
 const TTL_MS = 60 * 60 * 1000; // 1 hour
-const store = new Map(); // uid → { iv, ciphertext, createdAt }
+const store = new Map(); // uid → { iv, ciphertext, salt, createdAt, clients: [] }
 
 function pruneExpired() {
   const now = Date.now();
@@ -40,30 +105,34 @@ app.get('/health', (_req, res) => {
 
 /**
  * POST /register
- * Body: { uid: string, iv: string, ciphertext: string }
+ * Body: { uid: string, iv: string, ciphertext: string, salt: string }
  *
  * The broker receives an ALREADY-ENCRYPTED blob from the host CLI.
  * It never decrypts — just stores the { iv, ciphertext } pair.
  */
-app.post('/register', (req, res) => {
+app.post('/register', strictLimiter, (req, res) => {
   try {
-    const { uid, iv, ciphertext } = req.body;
+    const { uid, iv, ciphertext, salt } = req.body;
 
-    if (!uid || !iv || !ciphertext) {
-      return res.status(400).json({ error: 'Missing uid, iv, or ciphertext' });
+    if (!uid || !iv || !ciphertext || !salt) {
+      recordViolation(req);
+      return res.status(400).json({ error: 'Missing uid, iv, ciphertext, or salt' });
     }
 
     if (typeof uid !== 'string' || uid.length < 6 || uid.length > 16) {
+      recordViolation(req);
       return res.status(400).json({ error: 'Invalid UID format (6-16 chars)' });
     }
 
     // Validate IV format — must be 32 hex chars (16 bytes)
     if (!/^[a-f0-9]{32}$/i.test(iv)) {
+      recordViolation(req);
       return res.status(400).json({ error: 'Invalid IV format (expected 32 hex chars)' });
     }
 
     // Validate ciphertext is non-empty base64
     if (typeof ciphertext !== 'string' || ciphertext.length === 0) {
+      recordViolation(req);
       return res.status(400).json({ error: 'Invalid ciphertext' });
     }
 
@@ -71,7 +140,9 @@ app.post('/register', (req, res) => {
     store.set(uid, {
       iv,
       ciphertext,
+      salt,
       createdAt: Date.now(),
+      clients: []
     });
 
     console.log(`✅ [${new Date().toLocaleTimeString()}] Registered UID: ${uid} (encrypted, ${ciphertext.length} bytes)`);
@@ -93,6 +164,7 @@ app.get('/resolve/:uid', (req, res) => {
     const entry = store.get(uid);
 
     if (!entry) {
+      // Don't strictly record a violation for one typo, but repeated 404s will be caught by rate limiter
       return res.status(404).json({ error: 'UID not found or expired' });
     }
 
@@ -105,9 +177,50 @@ app.get('/resolve/:uid', (req, res) => {
     console.log(`🔍 [${new Date().toLocaleTimeString()}] Resolved UID: ${uid} (returning encrypted blob)`);
 
     // Return encrypted blob — client decrypts
-    res.json({ uid, iv: entry.iv, ciphertext: entry.ciphertext });
+    res.json({ uid, iv: entry.iv, ciphertext: entry.ciphertext, salt: entry.salt });
   } catch (err) {
     console.error('❌ Resolve error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /client-info/:uid
+ * Clients securely post their encrypted hardware telemetry.
+ */
+app.post('/client-info/:uid', generalLimiter, (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { iv, ciphertext, salt } = req.body;
+    
+    const entry = store.get(uid);
+    if (!entry) return res.status(404).json({ error: 'UID not found' });
+    if (!iv || !ciphertext || !salt) return res.status(400).json({ error: 'Missing encrypted telemetry payload' });
+
+    entry.clients.push({ iv, ciphertext, salt, seenAt: Date.now() });
+    
+    // Keep max 50 recent client pings to prevent memory leaks
+    if (entry.clients.length > 50) entry.clients.shift();
+
+    res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /clients/:uid
+ * Host retrieves all securely encrypted client telemetry blobs.
+ */
+app.get('/clients/:uid', generalLimiter, (req, res) => {
+  try {
+    const { uid } = req.params;
+    const entry = store.get(uid);
+    
+    if (!entry) return res.status(404).json({ error: 'UID not found' });
+
+    res.json({ clients: entry.clients });
+  } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -116,11 +229,18 @@ app.get('/resolve/:uid', (req, res) => {
  * DELETE /revoke/:uid
  * Allows host to explicitly remove their UID before expiry.
  */
-app.delete('/revoke/:uid', (req, res) => {
+app.delete('/revoke/:uid', strictLimiter, (req, res) => {
   const { uid } = req.params;
   const existed = store.delete(uid);
   console.log(`🚫 [${new Date().toLocaleTimeString()}] Revoked UID: ${uid} (existed: ${existed})`);
   res.json({ status: existed ? 'revoked' : 'not_found' });
+});
+
+// ─── Global Error Handler ────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('❌ Express Error:', err.message);
+  if (err.stack) console.error(err.stack);
+  res.status(err.status || 500).json({ error: 'Internal Server Error' });
 });
 
 // ─── Launch ──────────────────────────────────────────────────

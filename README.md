@@ -1,73 +1,106 @@
-# 🔗 iPingYou — SecureLink CLI
+<div align="center">
+  <h1>🔗 iPingYou — SecureLink CLI v2.0</h1>
+  <p><strong>Military-Grade, Zero-Knowledge P2P Remote Access & Collaboration Tool</strong></p>
 
-Secure peer-to-peer remote access via SSH & Cloudflare Tunnels. A zero-configuration Node.js CLI tool that lets two machines establish an encrypted SSH connection through Cloudflare's network, instantly.
+  [![npm version](https://img.shields.io/npm/v/@miraj181/ipingyou.svg?style=flat-square)](https://www.npmjs.com/package/@miraj181/ipingyou)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+  [![Node.js Version](https://img.shields.io/node/v/@miraj181/ipingyou.svg?style=flat-square)](https://nodejs.org)
+</div>
 
-## Architecture
+---
 
-```
- Host Machine                                                     Client Machine
-┌──────────────┐   POST                          GET       ┌──────────────┐
-│ cloudflared  │──/register──▶[Broker Server]◀─/resolve──│   ipingyou   │
-│ tunnel :22   │   {uid,url}  (Render Hosted)    /:uid     │   connect    │
-│              │              AES-256-CBC                  │              │
-│  SSH daemon  │◀─────────────               ─────────────│  SSH via     │
-│              │  cloudflared                 ProxyCmd    │  ProxyCmd    │
-└──────────────┘  TCP proxy                                └──────────────┘
-```
+**iPingYou** is a zero-configuration Node.js CLI that establishes AES-encrypted, peer-to-peer SSH tunnels using Cloudflare's Edge network. Version 2.0 introduces **End-to-End Encrypted WebSockets**, **Terminal Mirroring**, **Passwordless Ephemeral Keys**, and **Background Daemonization**.
 
-### Flow
-1. **Host** starts `ipingyou host` → generates an 8-char UID, spins up `cloudflared` tunnel, and registers with the broker.
-2. **Host** shares the UID with the client.
-3. **Client** runs `ipingyou connect` → enters UID, broker resolves it to tunnel URL → SSH connects via cloudflared proxy.
-4. On `Ctrl+C`, all spawned processes are killed via `tree-kill` and the UID is automatically revoked from the broker.
+No firewalls to configure. No port forwarding. No plaintext leakage.
 
-## Usage
+## ✨ God-Tier Features (New in v2.0)
 
-You do not need to clone the repository or configure any `.env` files. `iPingYou` is purely published on npm and handles the backend API automatically!
+* 🔐 **Ephemeral Passwordless Auth**: The Host automatically injects a temporary `Ed25519` key into `authorized_keys`. Clients connect instantly without knowing the machine's actual root/user password. Keys are purged immediately on exit.
+* 💬 **E2E Web Crypto Chat Room**: A real-time, browser-based chat UI using native Web Crypto API (`AES-GCM`). Your chat keys are passed via URL fragments (`#password`) so they never touch a server—not even the Host machine's Node server!
+* 📺 **Terminal Mirroring**: Wrap client SSH sessions in a multiplexed `tmux` terminal. The Host can spectate connected clients in real-time right from the dashboard to audit or assist.
+* 🔄 **Reverse Port Forwarding (`ssh -R`)**: Clients can expose their *local* `localhost` development ports back to the Host through the secure tunnel.
+* 📡 **Hardware Telemetry Verification**: Clients silently generate hardware footprint reports (OS, RAM, CPU, IP), encrypt them locally with the session password, and send them to the Host for authorization.
+* 🚨 **Panic Kill-Switch**: Type `ipingyou panic` to instantly vaporize all associated keys, wipe all alias configs, and send a `SIGKILL` to every active tunnel and SSH shell.
+* 👻 **Daemonization**: Run `ipingyou service install` to quietly install and run the Host listener in the background (survives system reboots using PM2).
+
+---
+
+## 🚀 Quick Start
+
+You don't need to download any code. `iPingYou` runs natively from the global npm registry.
 
 ### The "On-the-Fly" Way (Recommended)
-Run it anywhere using `npx` (make sure you aren't inside the project source code folder):
-
 ```bash
 # Start the interactive wizard
 npx @miraj181/ipingyou
 
-# Or instantly start as a Host
+# Instantly spin up your machine as a Host
 npx @miraj181/ipingyou host
 
-# Or instantly connect as a Client
+# Connect to a remote machine using a session UID
 npx @miraj181/ipingyou connect
 ```
 
 ### Global Install
-If you use the tool frequently, install it globally:
-
 ```bash
 npm install -g @miraj181/ipingyou
 
-# Run as native commands:
+# Execute globally using aliases:
 ipingyou
+# or
 securelink
 ```
 
-## Prerequisites
+---
 
-| Tool | Required | Install |
-|------|----------|---------|
-| Node.js ≥18 | ✅ | [nodejs.org](https://nodejs.org) |
-| `ssh` | ✅ | Ships with macOS/Linux; `winget install Microsoft.OpenSSH.Client` on Windows |
-| `cloudflared` | ✅ | `brew install cloudflared` / [download](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) |
+## 🔒 Zero-Knowledge Architecture
 
-*The CLI auto-detects your OS and will attempt to guide you on how to install missing dependencies!*
+The public broker server exists solely to rendezvous connections. It is fundamentally a **"Dumb Pipe"**.
 
-## Security
+```mermaid
+graph LR
+    H[Host CLI] -->|AES-256-CBC Encrypted Payload| B((Broker Relay))
+    B -->|Encrypted Payload| C[Client CLI]
+    C -->|Locally Decrypts Password| C
+    C -->|Direct Cloudflare SSH| H
+    C -->|E2E AES-GCM WebSockets| H
+```
 
-- **Zero-Knowledge Architecture** — The broker never sees the plaintext Cloudflare URL. It is strictly used as an encrypted key-value store.
-- **AES-256-CBC** — Tunnel URLs are encrypted locally before being transmitted to the broker.
-- **Random UIDs** — 8-char nanoid, not hardware-based. When the session dies, the door is locked forever.
-- **Auto-revoke** — On `Ctrl+C`, UID is immediately deleted from the broker before exit.
-- **No Persistence** — Broker uses an in-memory Map only with strict 1-hour TTLs.
+1. **Host** starts up, spawns `cloudflared` tunnels for SSH and Chat, and generates a random, offline **AES-256 Session Password**.
+2. **Host** encrypts the tunnel data with the password and sends the *ciphertext* to the Broker alongside a short UID.
+3. **Client** runs `ipingyou connect`, enters the UID and Password.
+4. **Client** fetches the ciphertext, decrypts it locally, and connects directly via SSH and WebSockets.
+5. On `Ctrl+C`, `tree-kill` initiates a graceful shutdown, revokes the UID from the broker, and scrubs `/tmp` memory.
 
-## License
+---
 
-MIT
+## 🛠 Prerequisites
+
+| Tool | Required | Installation Guide |
+|------|----------|--------------------|
+| **Node.js ≥18** | ✅ | [nodejs.org](https://nodejs.org) |
+| **`ssh`** | ✅ | Ships native on macOS/Linux. Windows: `winget install Microsoft.OpenSSH.Client` |
+| **`cloudflared`** | ✅ | `brew install cloudflared` or [Download Here](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) |
+| **`tmux`** | 〰️ | *Optional*. Required on Host machine if you want to use **Terminal Mirroring**. |
+
+*(Note: The CLI auto-detects your OS and will attempt to guide you on how to install any missing dependencies!)*
+
+---
+
+## 📖 CLI Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `ipingyou` | Interactive CLI dashboard wizard. |
+| `ipingyou host` | Start hosting and exposing your local machine securely. |
+| `ipingyou connect -u <UID>` | Connect directly to a specific UID. |
+| `ipingyou panic` | 🚨 Self-destruct mode. Wipes configs, memory, and kills all processes. |
+| `ipingyou service install` | 👻 Installs Host mode as an always-on background daemon. |
+| `ipingyou service stop` | Stops and removes the background daemon. |
+
+---
+
+## 📜 License
+
+[MIT License](LICENSE) © Sk Mirajul Islam
+

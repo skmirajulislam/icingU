@@ -23,9 +23,14 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 
 import { detectOS, checkDependencies } from './lib/platform.js';
-import { installShutdownHandlers } from './lib/cleanup.js';
+import { installShutdownHandlers, executePanicMode } from './lib/cleanup.js';
 import { startHostMode } from './modes/host.js';
 import { startClientMode } from './modes/client.js';
+import { execa } from 'execa';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ─── ASCII Banner ────────────────────────────────────────────
 function showBanner() {
@@ -67,10 +72,20 @@ function showRichHelp() {
   console.log(`    • The Broker never sees your plaintext URL, only ciphertext.`);
   console.log('');
 
+  console.log(chalk.bold.white('  🔥 Advanced Features:'));
+  console.log(`    • ${chalk.green('Terminal Mirroring')}   : Host can spectate connected SSH clients in real-time.`);
+  console.log(`    • ${chalk.green('Reverse Forwarding')} : Clients can expose their local localhost ports back to the Host.`);
+  console.log(`    • ${chalk.green('E2E Chat Room')}      : Real-time Web Crypto AES-GCM secure chat UI for Host & Clients.`);
+  console.log(`    • ${chalk.green('Daemonization')}      : Run Host mode as a background service via PM2.`);
+  console.log(`    • ${chalk.green('Panic Kill-Switch')}  : Instantly purge all processes, configurations, and traces.`);
+  console.log('');
+
   console.log(chalk.bold.white('  💡 Examples:'));
-  console.log(`    $ npx ipingyou          ${chalk.dim('# Interactive wizard (Recommended)')}`);
-  console.log(`    $ npx ipingyou host     ${chalk.dim('# Quick start as Host')}`);
-  console.log(`    $ npx ipingyou connect  ${chalk.dim('# Quick start as Client')}`);
+  console.log(`    $ npx ipingyou                  ${chalk.dim('# Interactive wizard (Recommended)')}`);
+  console.log(`    $ npx ipingyou host             ${chalk.dim('# Quick start as Host')}`);
+  console.log(`    $ npx ipingyou connect          ${chalk.dim('# Quick start as Client')}`);
+  console.log(`    $ npx ipingyou panic            ${chalk.dim('# Self-destruct and wipe memory/traces')}`);
+  console.log(`    $ npx ipingyou service install  ${chalk.dim('# Install Host mode as a background daemon')}`);
   console.log('');
 }
 
@@ -90,6 +105,16 @@ function fatal(context, err) {
   console.error('');
   process.exit(1);
 }
+
+// ─── Process-Level Error Catching ────────────────────────────
+process.on('uncaughtException', (err) => {
+  fatal('uncaughtException', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  fatal('unhandledRejection', err);
+});
 
 // ─── Interactive Mode Selection ──────────────────────────────
 async function interactiveMode() {
@@ -158,6 +183,7 @@ program
   .name('ipingyou')
   .description('SecureLink-CLI — Secure P2P remote access via SSH & Cloudflare Tunnels')
   .version('1.0.0')
+  .option('-b, --broker <url>', 'Override the central broker URL')
   .addHelpText('beforeAll', () => {
     showBanner();
     showRichHelp();
@@ -169,6 +195,9 @@ program
   .description('Start host mode — allow remote access to this machine')
   .action(async () => {
     try {
+      const opts = program.opts();
+      if (opts.broker) process.env.BROKER_URL = opts.broker;
+
       showBanner();
       showSystemInfo();
       installShutdownHandlers();
@@ -185,6 +214,9 @@ program
   .option('-u, --uid <uid>', 'The remote host UID')
   .action(async () => {
     try {
+      const opts = program.opts();
+      if (opts.broker) process.env.BROKER_URL = opts.broker;
+
       showBanner();
       showSystemInfo();
       installShutdownHandlers();
@@ -195,9 +227,57 @@ program
     }
   });
 
+program
+  .command('panic')
+  .description('🚨 Self-destruct mode: wipe all configs, kill tunnels, and remove traces')
+  .action(async () => {
+    try {
+      showBanner();
+      await executePanicMode();
+    } catch (err) {
+      fatal('panic', err);
+    }
+  });
+
+program
+  .command('service <action>')
+  .description('👻 Manage background daemon (actions: install, stop, status)')
+  .action(async (action) => {
+    try {
+      showBanner();
+      console.log(chalk.bold.cyan('  👻 Background Service Manager'));
+      console.log(chalk.dim('  ──────────────────────────────────────'));
+      
+      const { execaCommand } = await import('execa');
+      
+      if (action === 'install') {
+        console.log(chalk.dim('  Installing PM2 globally and starting host...'));
+        await execaCommand('npm install -g pm2', { stdio: 'inherit' });
+        await execaCommand('pm2 start ipingyou --name "ipingyou-host" -- host', { stdio: 'inherit' });
+        await execaCommand('pm2 save', { stdio: 'inherit' });
+        await execaCommand('pm2 startup', { stdio: 'inherit' });
+        console.log(chalk.green('\n  ✅ Service installed and running in the background.'));
+      } else if (action === 'stop') {
+        await execaCommand('pm2 stop ipingyou-host', { stdio: 'inherit' });
+        await execaCommand('pm2 delete ipingyou-host', { stdio: 'inherit' });
+        await execaCommand('pm2 save', { stdio: 'inherit' });
+        console.log(chalk.green('\n  ✅ Service stopped and removed.'));
+      } else if (action === 'status') {
+        await execaCommand('pm2 status ipingyou-host', { stdio: 'inherit' });
+      } else {
+        console.log(chalk.red(`  ❌ Unknown action: ${action}. Use install, stop, or status.`));
+      }
+    } catch (err) {
+      fatal('service', err);
+    }
+  });
+
 // ─── Default: interactive mode ──────────────────────────────
 program.action(async () => {
   try {
+    const opts = program.opts();
+    if (opts.broker) process.env.BROKER_URL = opts.broker;
+
     installShutdownHandlers();
     await interactiveMode();
   } catch (err) {
