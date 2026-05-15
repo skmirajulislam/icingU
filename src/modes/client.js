@@ -331,6 +331,7 @@ async function performSCP(username, hostname, direction, privateKeyPath) {
   if (direction === 'upload') {
     scpArgs.push(localPath, `${username}@${hostname}:${remotePath}`);
   } else {
+    // Download: remote source FIRST, then local destination
     scpArgs.push(`${username}@${hostname}:${remotePath}`, localPath);
   }
 
