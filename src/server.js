@@ -79,8 +79,11 @@ function recordViolation(req) {
   }
 }
 
-// ─── In-memory store — auto-expire after TTL ─────────────────
+// ─── Constants & Limits ──────────────────────────────────────
 const TTL_MS = 60 * 60 * 1000; // 1 hour
+const MAX_UIDS = 50000;        // Max concurrent tunnels (prevent memory leak)
+const MAX_VIOLATIONS = 50000;  // Max tracked malicious IPs before reset
+
 const store = new Map(); // uid → { iv, ciphertext, salt, createdAt, clients: [] }
 
 function pruneExpired() {
@@ -91,6 +94,10 @@ function pruneExpired() {
       console.log(`🗑️  Expired UID: ${uid}`);
     }
   }
+
+  // Strict check to prevent malicious OOM overflow
+  if (ipViolations.size > MAX_VIOLATIONS) ipViolations.clear();
+  if (blacklistedIPs.size > MAX_VIOLATIONS) blacklistedIPs.clear();
 }
 
 // Run pruning every 5 minutes
@@ -134,6 +141,11 @@ app.post('/register', strictLimiter, (req, res) => {
     if (typeof ciphertext !== 'string' || ciphertext.length === 0) {
       recordViolation(req);
       return res.status(400).json({ error: 'Invalid ciphertext' });
+    }
+
+    // Prevent broker OOM
+    if (store.size >= MAX_UIDS && !store.has(uid)) {
+      return res.status(503).json({ error: 'Broker is at maximum capacity. Please try again later.' });
     }
 
     // Store the encrypted blob as-is — broker NEVER decrypts
