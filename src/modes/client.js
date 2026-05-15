@@ -187,7 +187,7 @@ async function connectSSH(username, hostname, privateKeyPath) {
     }
 
     sshArgs.push(`${username}@${hostname}`);
-    sshArgs.push('-t', 'tmux new-session -A -s SecureLink_Session || exec $SHELL');
+    sshArgs.push('-t', 'tmux new-session -A -s SecureLink_Session 2>/dev/null || exec $SHELL -l');
 
     const child = execa('ssh', sshArgs, {
       stdio: 'inherit',

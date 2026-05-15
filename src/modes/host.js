@@ -18,6 +18,8 @@ import chalk from 'chalk';
 import inquirer from 'inquirer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
+import os from 'node:os';
 import { generateUID } from '../lib/uid.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { trackPID, untrackPID, setRevokeOnExit, addCleanupHook } from '../lib/cleanup.js';
@@ -82,6 +84,50 @@ async function ensureSSHRunning() {
   } catch (err) {
     spinner.fail(`Service check failed: ${err.message}`);
     console.log(chalk.dim('  Continue anyway? The tunnel will still start, but connections may fail.'));
+  }
+}
+
+/**
+ * Ensure tmux is installed for terminal mirroring.
+ */
+async function ensureTmuxInstalled() {
+  const osInfo = detectOS();
+  if (osInfo.isWindows) return;
+
+  const spinner = createSpinner('Checking tmux installation...', networkSpinner).start();
+  try {
+    try {
+      await execaCommand('tmux -V', { reject: true });
+      spinner.succeed('tmux is installed (Terminal Mirroring available)');
+    } catch {
+      spinner.text = 'tmux not found. Attempting to install...';
+      if (osInfo.isLinux) {
+        if (fs.existsSync('/usr/bin/apt') || fs.existsSync('/usr/bin/apt-get')) {
+          await execaCommand('sudo apt-get update && sudo apt-get install -y tmux', { shell: true, stdio: 'inherit' });
+        } else if (fs.existsSync('/usr/bin/dnf')) {
+          await execaCommand('sudo dnf install -y tmux', { shell: true, stdio: 'inherit' });
+        } else if (fs.existsSync('/usr/bin/yum')) {
+          await execaCommand('sudo yum install -y tmux', { shell: true, stdio: 'inherit' });
+        } else if (fs.existsSync('/usr/bin/pacman')) {
+          await execaCommand('sudo pacman -S --noconfirm tmux', { shell: true, stdio: 'inherit' });
+        } else if (fs.existsSync('/sbin/apk')) {
+          await execaCommand('sudo apk add tmux', { shell: true, stdio: 'inherit' });
+        } else {
+          throw new Error('Unsupported Linux package manager');
+        }
+        spinner.succeed('tmux installed successfully (Terminal Mirroring available)');
+      } else if (osInfo.isMac) {
+        try {
+          await execaCommand('brew install tmux', { shell: true, stdio: 'inherit' });
+          spinner.succeed('tmux installed successfully (Terminal Mirroring available)');
+        } catch {
+          throw new Error('Homebrew is required to install tmux on macOS');
+        }
+      }
+    }
+  } catch (err) {
+    spinner.fail(`tmux check/install failed: ${err.message}`);
+    console.log(chalk.dim('  Terminal Mirroring feature will not be available.'));
   }
 }
 
@@ -565,6 +611,7 @@ export async function startHostMode() {
 
   if (serviceType === 'ssh') {
     await ensureSSHRunning();
+    await ensureTmuxInstalled();
     console.log(chalk.dim('  🔑 Generating ephemeral SSH key for passwordless entry...'));
     try {
       const ephemeralKey = await generateEphemeralKey();
