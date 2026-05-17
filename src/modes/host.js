@@ -146,7 +146,10 @@ async function ensureTmuxInstalled() {
 
 // ─── Ephemeral SSH Key Management ────────────────────────────
 async function generateEphemeralKey() {
-  const tmpDir = os.tmpdir();
+  const tmpDir = os.tmpdir() || process.env.TMPDIR || process.env.TEMP || process.env.TMP;
+  if (!tmpDir) {
+    throw new Error('Could not resolve a temporary directory for SSH key generation');
+  }
   const keyPath = path.join(tmpDir, `ipingyou_${Date.now()}`);
   
   await execa('ssh-keygen', ['-t', 'ed25519', '-C', 'ipingyou-ephemeral', '-f', keyPath, '-N', '']);
@@ -158,8 +161,12 @@ async function generateEphemeralKey() {
 }
 
 async function injectPublicKey(pubKey) {
-  const osInfo = detectOS();
-  const sshDir = path.join(osInfo.homedir, '.ssh');
+  const homedir = os.homedir();
+  if (!homedir) {
+    throw new Error('Could not resolve the current user home directory for authorized_keys');
+  }
+
+  const sshDir = path.join(homedir, '.ssh');
   
   if (!fs.existsSync(sshDir)) {
     await fs.promises.mkdir(sshDir, { mode: 0o700, recursive: true });
@@ -537,7 +544,7 @@ export async function startHostMode() {
       });
       console.log(chalk.green('  ✓ Ephemeral key injected. Client will connect without system password!'));
     } catch (err) {
-      console.log(chalk.yellow(`  ⚠️  Could not generate ephemeral key: ${err.message}`));
+      console.log(chalk.yellow(`  ⚠️  Could not prepare ephemeral SSH key: ${err.message}`));
       console.log(chalk.dim('     Client will need to use standard OS password.'));
     }
   } else {

@@ -21,12 +21,17 @@
 import { Command } from 'commander';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { detectOS, checkDependencies } from './lib/platform.js';
 import { cleanupAll, installShutdownHandlers, executePanicMode } from './lib/cleanup.js';
 import { startHostMode } from './modes/host.js';
 import { startClientMode } from './modes/client.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
 
 // ─── ASCII Banner ────────────────────────────────────────────
 const wolfAscii = [
@@ -215,7 +220,7 @@ const program = new Command();
 program
   .name('ipingyou')
   .description('SecureLink-CLI — Secure P2P remote access via SSH & Cloudflare Tunnels')
-  .version('2.0.11')
+  .version(packageJson.version)
   .option('-b, --broker <url>', 'Override the central broker URL')
   .addHelpText('beforeAll', () => {
     showBanner();

@@ -21,10 +21,7 @@ export function formatRemoteCd(remotePath) {
 export function formatScpRemotePath(remotePath) {
   const trimmed = String(remotePath || '').trim();
   if (!trimmed || trimmed === '~') return trimmed || '~';
-  if (trimmed.startsWith('~/')) {
-    return `~/${quoteRemoteShell(trimmed.slice(2))}`;
-  }
-  return quoteRemoteShell(trimmed);
+  return trimmed;
 }
 
 export function getSshControlOptions(hostname) {
