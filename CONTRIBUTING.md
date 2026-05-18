@@ -1,4 +1,4 @@
-````md
+
 # Contributing to iPingYou
 
 Thank you for your interest in contributing to iPingYou 🚀
